@@ -1,25 +1,33 @@
 {
-  "name": "open-interview-assistant",
+  "name": "comind",
   "version": "1.0.0",
   "private": false,
-  "description": "Open-source interview overlay \u2014 invisible on screenshare, no mic or system recording permission (no privacy light), mouse pass-through, keyboard-only. Reads page text via Chrome extension. From DarkInterview.",
+  "description": "CoMind：智能办公助手，支持网页采集、图片识别、资料整理与模型问答",
   "license": "Apache-2.0",
   "author": "DarkInterview (https://darkinterview.com)",
-  "homepage": "https://harry-the-nerd.github.io/open-interview-assistant/",
+  "homepage": "https://github.com/azhsmesos/CoMind#readme",
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "concurrently --kill-others \"vite --port 5180 --strictPort\" \"wait-on http://localhost:5180 && npm run build:electron && cross-env NODE_ENV=development electron .\"",
     "build": "vite build && npm run build:electron",
-    "build:electron": "tsc -p electron/tsconfig.json",
+    "build:electron": "node -e \"require('node:fs').rmSync('dist-electron', { recursive: true, force: true })\" && tsc -p electron/tsconfig.json",
     "typecheck": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
-    "start": "npm run build && electron ."
+    "start": "npm run build && electron .",
+    "test": "npm run build:electron && node --test tests/*.test.cjs",
+    "test:e2e": "npm run build && node scripts/e2e.cjs",
+    "test:screenshot": "npm run build && node scripts/screenshot-e2e.cjs",
+    "test:packaged": "node scripts/smoke.cjs",
+    "dist:mac": "npm run build && electron-builder --mac --arm64 --x64 --publish never",
+    "dist:win": "npm run build && electron-builder --win --x64 --publish never",
+    "pack": "npm run build && electron-builder --dir --publish never"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.115.0",
+    "lucide-react": "^1.47.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^22.9.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
@@ -27,9 +35,10 @@
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.1.0",
     "cross-env": "^7.0.3",
-    "dotenv": "^17.3.1",
     "electron": "43.1.0",
+    "electron-builder": "26.15.3",
     "postcss": "^8.4.49",
+    "prettier": "^3.9.8",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
@@ -37,10 +46,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/harry-the-nerd/open-interview-assistant.git"
+    "url": "git+https://github.com/azhsmesos/CoMind.git"
   },
   "bugs": {
-    "url": "https://github.com/harry-the-nerd/open-interview-assistant/issues"
+    "url": "https://github.com/azhsmesos/CoMind/issues"
   },
   "keywords": [
     "interview",
@@ -52,5 +61,64 @@
     "open-source",
     "leetcode",
     "darkinterview"
-  ]
+  ],
+  "productName": "CoMind",
+  "build": {
+    "appId": "com.xiaomian.interview",
+    "productName": "CoMind",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "artifactName": "CoMind-${version}-${os}-${arch}.${ext}",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json",
+      "LICENSE",
+      "NOTICE",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "extension",
+        "to": "extension"
+      },
+      {
+        "from": "build/tray.png",
+        "to": "build/tray.png"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "build/icon.png"
+      }
+    ],
+    "asar": true,
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "icon": "build/icon.icns",
+      "identity": null,
+      "category": "public.app-category.productivity"
+    },
+    "dmg": {
+      "title": "CoMind"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "CoMind",
+      "deleteAppDataOnUninstall": false
+    }
+  }
 }

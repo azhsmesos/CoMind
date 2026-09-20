@@ -1,4 +1,4 @@
-# Promo drafts — Open Interview Assistant
+# Promo drafts — CoMind
 
 Links:
 
@@ -32,7 +32,7 @@ That lights up the OS privacy indicator (the orange/green dot). In a live interv
 
 I open-sourced an alternative:
 
-**Open Interview Assistant** — free, local, bring your own API key.
+**CoMind** — free, local, bring your own API key.
 
 How it’s different:
 
@@ -64,7 +64,7 @@ Worse: a lot of them rely on **mic + screen-recording permission**. On macOS tha
 
 So I open-sourced something different:
 
-### Open Interview Assistant
+### CoMind
 <https://github.com/harry-the-nerd/open-interview-assistant>
 
 **What it does**
@@ -109,7 +109,7 @@ They’re charging ~**$799**, and a lot of these tools need **mic + screen recor
 
 I open-sourced a free alternative:
 
-**Open Interview Assistant**  
+**CoMind**
 <https://github.com/harry-the-nerd/open-interview-assistant>
 
 How it works differently:

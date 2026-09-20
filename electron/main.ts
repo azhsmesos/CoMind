@@ -1,191 +1,483 @@
-// main.ts — app lifecycle, global shortcuts and IPC for the interview overlay.
-
-import { app, globalShortcut, ipcMain } from "electron";
-import { DomServer, ensureExtensionToken, type DomPayload } from "./DomServer";
-import { OverlayWindow } from "./OverlayWindow";
-import { generateInterviewScript, type PageContext } from "./llm";
 import {
-	getApiKey,
-	getSettings,
-	updateSettings,
-	type Effort,
-	type Settings,
-} from "./settings";
+  app,
+  BrowserWindow,
+  ipcMain,
+  globalShortcut,
+  Menu,
+  Tray,
+  nativeImage,
+  safeStorage,
+  shell,
+  dialog,
+  clipboard,
+} from "electron";
+import fs from "node:fs";
+import path from "node:path";
+import { Store } from "./store";
+import { Service, message, sessionMarkdown } from "./service";
+import { DomServer } from "./DomServer";
+import { OverlayWindow, loadRenderer } from "./OverlayWindow";
+import { Screenshot } from "./Screenshot";
+import type { Command, CommandResult } from "../shared/types";
 
-if (!app.isPackaged) {
-	try {
-		require("dotenv").config();
-	} catch {
-		// dotenv is a dev convenience; running without it is fine.
-	}
+// Preserve the existing profile and extension path across the brand upgrade.
+// Keep the bundle ID stable for existing installations.
+const legacyUserData = path.join(app.getPath("appData"), "小面 AI");
+if (
+  !process.env.COMIND_TEST_DATA &&
+  fs.existsSync(path.join(legacyUserData, "desktop-state.json"))
+)
+  app.setPath("userData", legacyUserData);
+
+// Explicit test directory isolates automated smoke tests from real user data.
+if (
+  process.env.COMIND_TEST_DATA &&
+  (process.env.COMIND_SMOKE === "1" || process.env.COMIND_E2E === "1")
+)
+  app.setPath("userData", process.env.COMIND_TEST_DATA);
+let mainWindow: BrowserWindow | null = null;
+let overlay: OverlayWindow;
+let screenshot: Screenshot;
+let tray: Tray | null = null;
+let service: Service;
+let dom: DomServer;
+let quitting = false;
+function broadcast() {
+  if (!service) return;
+  service.runtime.overlayVisible = overlay?.visible || false;
+  service.runtime.clickThrough = overlay?.clickThrough || false;
+  const state = service.state();
+  for (const win of [mainWindow, overlay?.window])
+    if (win && !win.isDestroyed())
+      win.webContents.send("desktop:changed", state);
 }
-
-const overlay = new OverlayWindow();
-let page: PageContext | null = null;
-let analysis: AbortController | null = null;
-
-const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh"];
-const OPACITIES = [0.35, 0.5, 0.72, 0.9];
-
-const domServer = new DomServer(
-	(payload) => void onPageCaptured(payload),
-	() => {
-		overlay.show();
-		overlay.send("toast", "Extension connected");
-	},
-);
-
-/**
- * Every shortcut the app registers. The panel ignores the mouse entirely, so
- * this list is the complete set of controls — there are no buttons.
- */
-const SHORTCUTS: { accelerator: string; run: () => void }[] = [
-	// Answer from whatever page context we have. The browser extension normally
-	// fires this for you the moment it delivers a page.
-	{ accelerator: "CommandOrControl+Return", run: () => void analyze() },
-	{ accelerator: "CommandOrControl+B", run: () => overlay.toggleVisibility() },
-	{ accelerator: "CommandOrControl+Shift+S", run: () => overlay.toggleSide() },
-	{
-		accelerator: "CommandOrControl+Shift+Left",
-		run: () => overlay.dock("left"),
-	},
-	{
-		accelerator: "CommandOrControl+Shift+Right",
-		run: () => overlay.dock("right"),
-	},
-	{ accelerator: "CommandOrControl+Up", run: () => overlay.send("scroll", -1) },
-	{
-		accelerator: "CommandOrControl+Down",
-		run: () => overlay.send("scroll", 1),
-	},
-	{ accelerator: "CommandOrControl+Shift+Up", run: () => overlay.move(0, -1) },
-	{ accelerator: "CommandOrControl+Shift+Down", run: () => overlay.move(0, 1) },
-	{ accelerator: "CommandOrControl+R", run: () => reset() },
-	{ accelerator: "CommandOrControl+Shift+E", run: () => cycle("effort") },
-	{ accelerator: "CommandOrControl+Shift+O", run: () => cycle("opacity") },
-	// Recovery only — first-run pairing is automatic once the extension loads.
-	{ accelerator: "CommandOrControl+Shift+P", run: () => armPairing() },
-	{
-		accelerator: "CommandOrControl+Shift+K",
-		run: () => overlay.send("toggle-help"),
-	},
-];
-
-function registerShortcuts(): void {
-	for (const { accelerator, run } of SHORTCUTS) {
-		const ok = globalShortcut.register(accelerator, run);
-		if (!ok)
-			console.warn(`[main] ${accelerator} is already taken by another app`);
-	}
+function showMain() {
+  mainWindow?.show();
+  mainWindow?.focus();
 }
-
-function publicSettings(s: Settings = getSettings()) {
-	// The renderer needs to know whether a key exists, never what it is.
-	return {
-		effort: s.effort,
-		opacity: s.opacity,
-		language: s.language,
-		hasKey: !!getApiKey(s),
-		port: domServer.listeningPort,
-	};
+function screenshotLog(text: string, error = false) {
+  const entry = { at: new Date().toISOString(), message: text, error };
+  const line = `[screenshot] ${entry.at} ${error ? "ERROR" : "INFO"} ${text}`;
+  error ? console.error(line) : console.info(line);
+  service.runtime.screenshotLog = [
+    ...(service.runtime.screenshotLog || []),
+    entry,
+  ].slice(-20);
+  const file = path.join(app.getPath("userData"), "screenshot.log");
+  service.runtime.screenshotLogPath = file;
+  try {
+    // Bounded local diagnostics; never include screen pixels or model credentials.
+    if (fs.existsSync(file) && fs.statSync(file).size > 1_000_000)
+      fs.renameSync(file, file + ".1");
+    fs.appendFileSync(file, line + "\n", "utf8");
+  } catch {
+    console.error("[screenshot] 无法写入本地截图日志");
+  }
+  service.changed(false);
 }
-
-function pushSettings(): void {
-	overlay.send("settings-changed", publicSettings());
+function registerShortcuts() {
+  service.runtime.shortcutsRecording = false;
+  if (mainWindow && !mainWindow.isDestroyed())
+    mainWindow.webContents.setIgnoreMenuShortcuts(false);
+  globalShortcut.unregisterAll();
+  const actions = {
+    generate: () => {
+      const s = service.store.data.sessions.find(
+        (s) => s.id === service.store.data.activeSessionId,
+      );
+      const r = s?.rounds.at(-1);
+      if (s && r)
+        void service
+          .answer(s.id, r.id)
+          .catch((e) => service.notice(message(e)));
+      else {
+        service.notice("请先输入题目或通过浏览器扩展采集");
+        showMain();
+      }
+    },
+    overlay: () => overlay.toggle(),
+    penetration: () => overlay.togglePenetration(),
+    pair: () => armPairing(),
+    screenshot: () => {
+      service.runtime.lastScreenshotShortcut = new Date().toISOString();
+      screenshotLog("收到截图快捷键");
+      void captureQuestion().catch((e) => {
+        service.notice(message(e));
+        showMain();
+      });
+    },
+  };
+  service.runtime.shortcutsErrors = [];
+  service.runtime.registeredShortcuts = {};
+  for (const [action, key] of Object.entries(
+    service.store.data.preferences.shortcuts,
+  )) {
+    if (!key) continue;
+    try {
+      if (
+        globalShortcut.register(key, actions[action as keyof typeof actions]) &&
+        globalShortcut.isRegistered(key)
+      )
+        service.runtime.registeredShortcuts[action as keyof typeof actions] =
+          key;
+      else
+        service.runtime.shortcutsErrors.push(
+          `${key || action}：无法注册，可能被其他应用占用`,
+        );
+    } catch {
+      service.runtime.shortcutsErrors.push(`${key}：快捷键格式无效`);
+    }
+  }
+  broadcast();
 }
-
-/** Step a setting to its next value — the keyboard stand-in for a control. */
-function cycle(which: "effort" | "opacity"): void {
-	const s = getSettings();
-	if (which === "effort") {
-		const next = EFFORTS[(EFFORTS.indexOf(s.effort) + 1) % EFFORTS.length];
-		updateSettings({ effort: next });
-		overlay.send("toast", `Thinking: ${next}`);
-	} else {
-		const index = OPACITIES.findIndex((value) => value >= s.opacity - 0.01);
-		updateSettings({ opacity: OPACITIES[(index + 1) % OPACITIES.length] });
-	}
-	overlay.show();
-	pushSettings();
+async function captureQuestion() {
+  if (service.runtime.jobs.screenshot) {
+    screenshotLog("上一张截图仍在处理中", true);
+    throw new Error("上一张截图仍在处理中");
+  }
+  const sessionId = service.store.data.activeSessionId;
+  const modelId = service.store.data.activeModelId;
+  service.runtime.jobs.screenshot = "正在框选截图…";
+  screenshotLog("开始截图");
+  try {
+    if (sessionId && service.session(sessionId).status !== "ongoing")
+      throw new Error("请先继续会话再截图");
+    const image = await screenshot.capture([mainWindow, overlay.window]);
+    if (!image || quitting) return;
+    if (
+      service.store.data.activeSessionId !== sessionId ||
+      service.store.data.activeModelId !== modelId
+    )
+      throw new Error("会话或模型已切换，请重新截图");
+    if (sessionId && service.session(sessionId).status !== "ongoing")
+      throw new Error("会话已暂停或结束，截图未发送");
+    service.runtime.jobs.screenshot = "正在上传截图并解答…";
+    service.runtime.lastCapture = new Date().toISOString();
+    service.runtime.lastPage = "框选截图";
+    service.runtime.notice = undefined;
+    service.changed(false);
+    overlay.show();
+    screenshotLog("框选完成，正在保存截图并尝试模型识别");
+    await service.add(
+      "请识别截图中的题目并解答",
+      "screenshot",
+      undefined,
+      image,
+    );
+    screenshotLog("截图识别完成");
+  } catch (e) {
+    screenshotLog(message(e), true);
+    throw e;
+  } finally {
+    delete service.runtime.jobs.screenshot;
+    service.changed(false);
+  }
 }
-
-/** Re-opens /pair for 60s when the extension lost its token or needs a fresh claim. */
-function armPairing(): void {
-	domServer.armPairing();
-	overlay.show();
-	overlay.send("pairing-armed", domServer.listeningPort);
-	overlay.send("toast", "Pairing open for 60s");
+function armPairing() {
+  dom.armPairing();
+  service.runtime.pairingUntil = Date.now() + 60000;
+  service.notice("已开放 60 秒重新配对窗口，请在扩展中点击重新配对");
 }
-
-/** The extension delivered a page: adopt it as context and answer immediately. */
-async function onPageCaptured(payload: DomPayload): Promise<void> {
-	page = payload;
-	overlay.show();
-	overlay.send("page-captured", {
-		title: payload.title,
-		chars: payload.text.length,
-	});
-	await analyze();
+function extensionDir() {
+  return path.join(app.getPath("userData"), "browser-extension");
 }
-
-function reset(): void {
-	analysis?.abort();
-	analysis = null;
-	page = null;
-	overlay.send("reset");
+function installExtension() {
+  const source = app.isPackaged
+    ? path.join(process.resourcesPath, "extension")
+    : path.join(app.getAppPath(), "extension");
+  fs.mkdirSync(extensionDir(), { recursive: true });
+  fs.cpSync(source, extensionDir(), { recursive: true });
 }
-
-async function analyze(): Promise<void> {
-	if (!page) {
-		overlay.send("toast", "Nothing captured yet.");
-		return;
-	}
-	analysis?.abort();
-	const controller = new AbortController();
-	analysis = controller;
-	overlay.show();
-	overlay.send("analysis-start");
-	try {
-		const script = await generateInterviewScript({ page }, controller.signal);
-		if (!controller.signal.aborted) overlay.send("analysis-result", script);
-	} catch (error: unknown) {
-		if (controller.signal.aborted) return;
-		const message = error instanceof Error ? error.message : String(error);
-		console.error("[main] analysis failed:", message);
-		overlay.send("analysis-error", message);
-	} finally {
-		if (analysis === controller) analysis = null;
-	}
+function allowed(event: Electron.IpcMainInvokeEvent) {
+  return [mainWindow, overlay?.window].some(
+    (w) =>
+      w &&
+      !w.isDestroyed() &&
+      w.webContents === event.sender &&
+      event.senderFrame === w.webContents.mainFrame,
+  );
 }
-
-function registerIpc(): void {
-	ipcMain.handle("state:get", () => ({
-		settings: publicSettings(),
-		page: page ? { title: page.title, chars: page.text.length } : null,
-	}));
+async function command(c: Command): Promise<CommandResult> {
+  try {
+    if (!c || typeof c.type !== "string") throw new Error("无效操作");
+    switch (c.type) {
+      case "shortcuts:record":
+        if (typeof c.recording !== "boolean")
+          throw new Error("无效快捷键录入状态");
+        if (c.recording) {
+          globalShortcut.unregisterAll();
+          mainWindow?.webContents.setIgnoreMenuShortcuts(true);
+          service.runtime.registeredShortcuts = {};
+          service.runtime.shortcutsRecording = true;
+          broadcast();
+        } else if (service.runtime.shortcutsRecording) registerShortcuts();
+        return { ok: true };
+      case "clipboard:write":
+        if (typeof c.text !== "string" || c.text.length > 500000)
+          throw new Error("复制内容无效或过长");
+        clipboard.writeText(c.text);
+        return { ok: true };
+      case "overlay:toggle":
+        overlay.toggle();
+        return { ok: true };
+      case "screenshot:capture":
+        await captureQuestion();
+        return { ok: true };
+      case "overlay:penetration":
+        overlay.togglePenetration();
+        return { ok: true };
+      case "extension:pair":
+        armPairing();
+        return { ok: true };
+      case "extension:open": {
+        const error = await shell.openPath(extensionDir());
+        if (error) throw new Error("无法打开扩展目录");
+        return { ok: true };
+      }
+      case "app:quit":
+        app.quit();
+        return { ok: true };
+      case "session:export": {
+        const session = service.session(c.id);
+        const result = await dialog.showSaveDialog(mainWindow!, {
+          title: "导出会话",
+          defaultPath: `CoMind-${session.createdAt.slice(0, 10)}.md`,
+          filters: [{ name: "Markdown", extensions: ["md"] }],
+        });
+        if (!result.canceled && result.filePath)
+          fs.writeFileSync(result.filePath, sessionMarkdown(session), "utf8");
+        return { ok: true, text: result.canceled ? "已取消导出" : "导出成功" };
+      }
+      default: {
+        const oldShortcuts = JSON.stringify(
+          service.store.data.preferences.shortcuts,
+        );
+        const text = await service.execute(c);
+        if (c.type === "preferences:save") {
+          overlay.protect(service.store.data.preferences.contentProtection);
+          if (
+            oldShortcuts !==
+              JSON.stringify(service.store.data.preferences.shortcuts) ||
+            service.runtime.shortcutsErrors.length > 0
+          )
+            registerShortcuts();
+          if (service.runtime.shortcutsErrors.length)
+            return {
+              ok: false,
+              error:
+                "设置已保存，但部分快捷键未生效：" +
+                service.runtime.shortcutsErrors.join("；") +
+                "。请更换组合键，或解除其他工具的占用后再次保存。",
+            };
+        }
+        return { ok: true, text };
+      }
+    }
+  } catch (e) {
+    return { ok: false, error: message(e) };
+  }
 }
-
-// One overlay per machine — a second copy would fight over the shortcuts.
-if (!app.requestSingleInstanceLock()) {
-	app.quit();
-} else {
-	app.on("second-instance", () => overlay.show());
-
-	app.whenReady().then(async () => {
-		// No dock tile: the overlay is meant to be unobtrusive during an interview.
-		if (process.platform === "darwin") app.dock?.hide();
-		ensureExtensionToken();
-		overlay.create();
-		registerIpc();
-		registerShortcuts();
-		await domServer.start();
-		pushSettings();
-	});
-
-	app.on("will-quit", () => {
-		globalShortcut.unregisterAll();
-		domServer.stop();
-	});
-	// The overlay is the whole app, so closing it means quitting.
-	app.on("window-all-closed", () => app.quit());
+function secureWindow(win: BrowserWindow) {
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (event) => event.preventDefault());
+  win.webContents.session.setPermissionRequestHandler(
+    (_webContents, _permission, callback) => callback(false),
+  );
+}
+if (!app.requestSingleInstanceLock()) app.quit();
+else {
+  app.on("second-instance", showMain);
+  app
+    .whenReady()
+    .then(async () => {
+      app.setName("CoMind");
+      const store = new Store(
+        path.join(app.getPath("userData"), "desktop-state.json"),
+        {
+          available: () => safeStorage.isEncryptionAvailable(),
+          encrypt: (value) =>
+            safeStorage.encryptString(value).toString("base64"),
+          decrypt: (value) =>
+            safeStorage.decryptString(Buffer.from(value, "base64")),
+        },
+      );
+      service = new Service(store, broadcast);
+      overlay = new OverlayWindow(broadcast);
+      screenshot = new Screenshot(screenshotLog);
+      dom = new DomServer(
+        (payload) => {
+          const current = store.data.sessions.find(
+            (s) => s.id === store.data.activeSessionId,
+          );
+          if (current?.status !== "paused") overlay.show();
+          void service
+            .capture(payload)
+            .catch((e) => service.notice(message(e)));
+        },
+        {
+          get: () => store.data,
+          update: (patch) => {
+            Object.assign(store.data, patch);
+            service.runtime.paired = store.data.extensionPaired;
+            service.changed();
+          },
+        },
+        () => {
+          service.runtime.pairingUntil = undefined;
+          service.notice("浏览器扩展已配对");
+        },
+      );
+      installExtension();
+      mainWindow = new BrowserWindow({
+        title: "CoMind",
+        icon: path.join(
+          app.isPackaged ? process.resourcesPath : app.getAppPath(),
+          "build",
+          "icon.png",
+        ),
+        width: 1320,
+        height: 900,
+        minWidth: 1000,
+        minHeight: 700,
+        backgroundColor: "#f4f6fa",
+        show: false,
+        webPreferences: {
+          preload: path.join(__dirname, "preload.js"),
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+        },
+      });
+      ipcMain.handle("desktop:state", (event) => {
+        if (!allowed(event)) throw new Error("不允许的请求");
+        return service.state();
+      });
+      ipcMain.handle("desktop:command", (event, c) => {
+        if (!allowed(event)) return { ok: false, error: "不允许的请求" };
+        return command(c);
+      });
+      secureWindow(mainWindow);
+      const restoreShortcuts = () => {
+        if (!quitting && service.runtime.shortcutsRecording)
+          registerShortcuts();
+      };
+      mainWindow.on("blur", restoreShortcuts);
+      mainWindow.on("hide", restoreShortcuts);
+      mainWindow.webContents.on("did-start-loading", restoreShortcuts);
+      mainWindow.webContents.on("render-process-gone", restoreShortcuts);
+      mainWindow.once("ready-to-show", showMain);
+      mainWindow.on("close", (event) => {
+        if (!quitting && tray) {
+          event.preventDefault();
+          mainWindow?.hide();
+        }
+      });
+      overlay.create();
+      secureWindow(overlay.window!);
+      overlay.protect(store.data.preferences.contentProtection);
+      const trayImage = nativeImage.createFromPath(
+        path.join(
+          app.isPackaged ? process.resourcesPath : app.getAppPath(),
+          "build",
+          "tray.png",
+        ),
+      );
+      tray = new Tray(trayImage.resize({ width: 18, height: 18 }));
+      tray.setToolTip("CoMind");
+      tray.setContextMenu(
+        Menu.buildFromTemplate([
+          { label: "打开CoMind", click: showMain },
+          { label: "显示 / 隐藏悬浮窗", click: () => overlay.toggle() },
+          { label: "切换鼠标穿透", click: () => overlay.togglePenetration() },
+          { label: "重新配对扩展", click: armPairing },
+          { type: "separator" },
+          { label: "退出", click: () => app.quit() },
+        ]),
+      );
+      tray.on("double-click", showMain);
+      Menu.setApplicationMenu(
+        Menu.buildFromTemplate([
+          ...(process.platform === "darwin"
+            ? [
+                {
+                  label: "CoMind",
+                  submenu: [
+                    { role: "about" as const },
+                    { type: "separator" as const },
+                    { role: "hide" as const },
+                    { role: "quit" as const },
+                  ],
+                },
+              ]
+            : []),
+          {
+            label: "编辑",
+            submenu: [
+              { role: "undo" },
+              { role: "redo" },
+              { type: "separator" },
+              { role: "cut" },
+              { role: "copy" },
+              { role: "paste" },
+              { role: "selectAll" },
+            ],
+          },
+          {
+            label: "窗口",
+            submenu: [
+              { label: "打开工作台", click: showMain },
+              { role: "minimize" },
+            ],
+          },
+        ]),
+      );
+      service.runtime.port = await dom.start();
+      if (!service.runtime.port)
+        service.notice("扩展服务端口被占用，手动输入仍可使用");
+      registerShortcuts();
+      await loadRenderer(mainWindow);
+      if (process.env.COMIND_SMOKE === "1") {
+        await mainWindow.webContents.executeJavaScript(
+          `new Promise(resolve => { const check = () => document.body.innerText.includes('智能工作台') ? resolve(true) : setTimeout(check, 50); check(); })`,
+        );
+        const checks = await mainWindow.webContents.executeJavaScript(
+          `({ title: document.title, hasApi: !!window.api, text: document.body.innerText })`,
+        );
+        const healthy =
+          checks.hasApi &&
+          checks.text.includes("CoMind") &&
+          service.runtime.port > 0 &&
+          fs.existsSync(extensionDir());
+        console.log(
+          "COMIND_SMOKE_RESULT=" +
+            JSON.stringify({
+              ok: healthy,
+              platform: process.platform,
+              arch: process.arch,
+              packaged: app.isPackaged,
+              checks,
+              port: service.runtime.port,
+            }),
+        );
+        app.exit(healthy ? 0 : 1);
+      }
+    })
+    .catch((error) => {
+      console.error("启动失败：", message(error));
+      dialog.showErrorBox("CoMind 启动失败", message(error));
+      app.exit(1);
+    });
+  app.on("activate", showMain);
+  app.on("before-quit", () => {
+    quitting = true;
+    service?.dispose();
+    globalShortcut.unregisterAll();
+    dom?.stop();
+    overlay?.destroy();
+    screenshot?.dispose();
+    tray?.destroy();
+  });
+  app.on("window-all-closed", () => {
+    if (!tray) app.quit();
+  });
 }

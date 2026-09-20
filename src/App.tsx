@@ -1,279 +1,331 @@
-import { useEffect, useRef, useState } from "react";
-import type { InterviewScript, PageStatus, PublicSettings } from "./types";
-
-const MOD = window.api.platform === "darwin" ? "⌘" : "Ctrl";
-
-const SHORTCUT_HINTS: [string, string][] = [
-	["⌘⇧U", "In Chrome: send this page and answer"],
-	[`${MOD} ↵`, "Answer again from what was captured"],
-	[`${MOD} ↑↓`, "Scroll the answer"],
-	[`${MOD} B`, "Hide or show this panel"],
-	[`${MOD} ⇧ ← →`, "Dock left or right"],
-	[`${MOD} ⇧ E`, "Cycle thinking effort"],
-	[`${MOD} ⇧ O`, "Cycle opacity"],
-	[`${MOD} ⇧ P`, "Re-arm pairing (recovery only)"],
-	[`${MOD} ⇧ K`, "Show or hide this help"],
-	[`${MOD} R`, "Clear everything"],
-];
-
-const CODE_SIZE = 13;
-
-function Section({
-	title,
-	children,
-}: {
-	title: string;
-	children: React.ReactNode;
-}) {
-	return (
-		<section className="border-t border-white/10 px-4 py-3">
-			<h2 className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-white/45">
-				{title}
-			</h2>
-			{children}
-		</section>
-	);
+import { useEffect, useState } from "react";
+import {
+  LayoutDashboard,
+  BookOpen,
+  History as HistoryIcon,
+  Settings as SettingsIcon,
+  Sparkles,
+  X,
+  EyeOff,
+  Grip,
+  PanelTop,
+  Power,
+  ArrowUpRight,
+  Keyboard,
+} from "lucide-react";
+import type { Command, CommandResult, DesktopState } from "./types";
+import { Workspace } from "./components/Workspace";
+import { Materials } from "./components/Materials";
+import { History } from "./components/History";
+import { Settings } from "./components/Settings";
+import { Shortcuts } from "./components/Shortcuts";
+import { Answer } from "./components/Answer";
+import type { Run } from "./components/Models";
+const navigation = [
+  {
+    id: "workspace",
+    label: "智能工作台",
+    icon: LayoutDashboard,
+    subtitle: "让信息更清晰，让工作更轻松",
+  },
+  {
+    id: "materials",
+    label: "我的资料库",
+    icon: BookOpen,
+    subtitle: "集中整理资料，随时获取所需",
+  },
+  {
+    id: "history",
+    label: "历史与复盘",
+    icon: HistoryIcon,
+    subtitle: "回顾每次会话，沉淀有用信息",
+  },
+  {
+    id: "settings",
+    label: "应用设置",
+    icon: SettingsIcon,
+    subtitle: "为你自己的工作方式而设置",
+  },
+  {
+    id: "shortcuts",
+    label: "快捷键",
+    icon: Keyboard,
+    subtitle: "框选题目，一键发送给 AI",
+  },
+] as const;
+type Tab = (typeof navigation)[number]["id"];
+function Overlay({ state, run }: { state: DesktopState; run: Run }) {
+  const active =
+    state.sessions.find((s) => s.id === state.activeSessionId) ||
+    state.sessions[0];
+  const round = active?.rounds.at(-1);
+  const [scriptId, setScriptId] = useState("");
+  useEffect(() => {
+    setScriptId("");
+  }, [round?.id]);
+  const script = state.materials.scripts.find((s) => s.id === scriptId);
+  return (
+    <div
+      className="native-overlay"
+      style={{
+        backgroundColor: `rgba(18,24,40,${state.preferences.opacity})`,
+        fontSize: state.preferences.fontSize,
+      }}
+    >
+      <header className="overlay-toolbar">
+        <span>
+          <Grip size={16} />
+          CoMind · 提词窗
+        </span>
+        <div className="button-row">
+          <button
+            title="切换鼠标穿透"
+            onClick={() => void run({ type: "overlay:penetration" })}
+          >
+            <EyeOff size={15} />
+          </button>
+          <button
+            title="隐藏悬浮窗"
+            onClick={() => void run({ type: "overlay:toggle" })}
+          >
+            <X size={15} />
+          </button>
+        </div>
+      </header>
+      <div className="overlay-controls">
+        <select
+          aria-label="提词窗内容"
+          value={scriptId}
+          onChange={(e) => setScriptId(e.target.value)}
+        >
+          <option value="">当前题目回答</option>
+          {state.materials.scripts.map((s) => (
+            <option value={s.id} key={s.id}>
+              {s.title || "未命名提词稿"}
+            </option>
+          ))}
+        </select>
+        <span>
+          {state.runtime.clickThrough
+            ? "穿透已开启 · 快捷键或主窗口恢复"
+            : "拖动顶部移动窗口"}
+        </span>
+      </div>
+      <main className="overlay-body">
+        {script ? (
+          <>
+            <h2>{script.title}</h2>
+            <p className="script-text">{script.content}</p>
+          </>
+        ) : (
+          <>
+            {round && <p className="overlay-question">{round.question}</p>}
+            {round?.status === "generating" && <p role="status">正在生成…</p>}
+            {round?.error && <p className="error-box">{round.error}</p>}
+            {round?.answer ? (
+              <Answer answer={round.answer} />
+            ) : (
+              <div className="empty">
+                <Sparkles size={32} />
+                <h3>等待你的下一道题目</h3>
+                <p>在工作台输入，或通过浏览器扩展发送。</p>
+              </div>
+            )}
+          </>
+        )}
+      </main>
+    </div>
+  );
 }
-
-function Spoken({ text }: { text: string }) {
-	return (
-		<p className="whitespace-pre-wrap text-[13px] leading-relaxed text-white/90">
-			{text}
-		</p>
-	);
-}
-
-/**
- * The code the candidate retypes. Long lines wrap under their own number rather
- * than running off the edge — there is no mouse here to scroll sideways with.
- */
-function Code({ text }: { text: string }) {
-	const lines = text.replace(/\n$/, "").split("\n");
-	const gutter = `${String(lines.length).length}ch`;
-	return (
-		<div
-			className="rounded-lg border border-white/10 bg-black/55 px-3 py-2.5 font-mono text-emerald-100"
-			style={{ fontSize: CODE_SIZE, lineHeight: 1.65 }}
-		>
-			{lines.map((line, index) => (
-				<div key={index} className="flex">
-					<span
-						className="mr-3 shrink-0 select-none text-right text-white/25"
-						style={{ width: gutter }}
-					>
-						{index + 1}
-					</span>
-					<span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
-						{line || " "}
-					</span>
-				</div>
-			))}
-		</div>
-	);
-}
-
 export default function App() {
-	const [settings, setSettings] = useState<PublicSettings | null>(null);
-	const [pageStatus, setPageStatus] = useState<PageStatus | null>(null);
-	const [script, setScript] = useState<InterviewScript | null>(null);
-	const [busy, setBusy] = useState(false);
-	const [error, setError] = useState<string | null>(null);
-	const [toast, setToast] = useState<string | null>(null);
-	const [pairingPort, setPairingPort] = useState<number | null>(null);
-	const [showHelp, setShowHelp] = useState(false);
-
-	const bodyRef = useRef<HTMLDivElement>(null);
-
-	useEffect(() => {
-		window.api.getState().then((state) => {
-			setSettings(state.settings);
-			setPageStatus(state.page);
-		});
-
-		const offs = [
-			window.api.onSettings(setSettings),
-			window.api.onPageCaptured((next) => {
-				setPageStatus(next);
-			}),
-			window.api.onPairingArmed((port) => {
-				setPairingPort(port);
-				setTimeout(() => setPairingPort(null), 60_000);
-			}),
-			window.api.onAnalysisStart(() => {
-				setBusy(true);
-				setError(null);
-				setScript(null);
-				bodyRef.current?.scrollTo({ top: 0 });
-			}),
-			window.api.onAnalysisResult((next) => {
-				setScript(next);
-				setBusy(false);
-			}),
-			window.api.onAnalysisError((message) => {
-				setError(message);
-				setBusy(false);
-			}),
-			window.api.onReset(() => {
-				setScript(null);
-				setError(null);
-				setBusy(false);
-				setPageStatus(null);
-			}),
-			window.api.onToast(setToast),
-			window.api.onToggleHelp(() => setShowHelp((open) => !open)),
-			window.api.onScroll((direction) => {
-				bodyRef.current?.scrollBy({ top: direction * 220, behavior: "smooth" });
-			}),
-		];
-		return () => offs.forEach((off) => off());
-	}, []);
-
-	useEffect(() => {
-		if (!toast) return;
-		const timer = setTimeout(() => setToast(null), 2600);
-		return () => clearTimeout(timer);
-	}, [toast]);
-
-	const alpha = settings?.opacity ?? 0.72;
-	const idle = !script && !busy && !error;
-
-	return (
-		<div className="flex h-screen font-sans">
-			<div
-				className="flex h-full w-full flex-col overflow-hidden border-x border-white/15 text-white shadow-2xl backdrop-blur-xl"
-				style={{ backgroundColor: `rgba(14, 15, 19, ${alpha})` }}
-			>
-				<header className="flex shrink-0 items-center gap-2 px-3 py-2">
-					<span className="text-[13px] font-semibold tracking-tight">
-						Interview
-					</span>
-					{busy && (
-						<span className="animate-pulse text-[11px] text-sky-300">
-							thinking…
-						</span>
-					)}
-					{!busy && pageStatus && (
-						<span className="truncate text-[11px] text-white/45">
-							{pageStatus.title || "page"} · {pageStatus.chars.toLocaleString()}{" "}
-							chars
-						</span>
-					)}
-					<span className="ml-auto shrink-0 text-[10px] uppercase tracking-wider text-white/30">
-						{settings?.effort ?? ""}
-					</span>
-				</header>
-
-				<div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto">
-					{pairingPort !== null && (
-						<section className="border-l-2 border-sky-400/70 bg-sky-400/[0.07] px-4 py-3">
-							<h2 className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-sky-200/80">
-								Re-pairing open for 60 seconds
-							</h2>
-							<p className="text-[13px] leading-relaxed text-white/85">
-								The extension will reconnect on its own, or open its popup and
-								choose <b>Re-pair</b>. Listening on port {pairingPort}.
-							</p>
-						</section>
-					)}
-
-					{error && (
-						<Section title="Error">
-							<p className="text-[13px] leading-relaxed text-red-300">
-								{error}
-							</p>
-						</Section>
-					)}
-
-					{(idle || showHelp) && (
-						<Section title="How this works">
-							<p className="mb-2 text-[13px] leading-relaxed text-white/75">
-								Load the Chrome extension once, then open the question and press{" "}
-								<b>⌘⇧U</b>. It pairs with this app automatically, reads the
-								page, and the answer appears here. This panel ignores the mouse
-								entirely — hovering and clicking go straight to the window
-								underneath, so it can never take focus from your editor.
-							</p>
-							<ul className="space-y-1">
-								{SHORTCUT_HINTS.map(([keys, what]) => (
-									<li
-										key={keys}
-										className="flex gap-3 text-[12px] text-white/60"
-									>
-										<kbd className="w-20 shrink-0 rounded bg-white/10 px-1.5 py-0.5 text-center text-[11px] text-white/80">
-											{keys}
-										</kbd>
-										<span>{what}</span>
-									</li>
-								))}
-							</ul>
-							{settings && !settings.hasKey && (
-								<p className="mt-2 text-[12px] text-amber-200">
-									No API key found. Put ANTHROPIC_API_KEY in .env and restart.
-								</p>
-							)}
-						</Section>
-					)}
-
-					{busy && !script && (
-						<Section title="Working">
-							<div className="space-y-2">
-								{[3, 4, 2].map((width, index) => (
-									<div
-										key={index}
-										className="h-3 animate-pulse rounded bg-white/10"
-										style={{ width: `${width * 22}%` }}
-									/>
-								))}
-							</div>
-						</Section>
-					)}
-
-					{script && (
-						<>
-							{/*
-							  Order matches a real interview arc so the candidate can scroll
-							  down as they speak: orient → restate → clarify → approach →
-							  code → walkthrough. Summary stays pinned at the top as the
-							  mid-interview glance sheet.
-							*/}
-							<section className="border-l-2 border-sky-400/70 bg-sky-400/[0.07] px-4 py-3">
-								<h2 className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-sky-200/80">
-									Summary
-								</h2>
-								<p className="whitespace-pre-wrap text-[14px] font-medium leading-relaxed text-white">
-									{script.summary}
-								</p>
-								<p className="mt-2 text-[12px] text-white/60">
-									Time {script.time_complexity} · Space{" "}
-									{script.space_complexity}
-								</p>
-							</section>
-
-							<Section title="Restate the problem">
-								<Spoken text={script.problem} />
-							</Section>
-							<Section title="Ask first">
-								<Spoken text={script.clarify} />
-							</Section>
-							<Section title="Talk through the approach">
-								<Spoken text={script.approach} />
-							</Section>
-							<Section title="Solution">
-								<Code text={script.code} />
-							</Section>
-							<Section title="Walk through an example">
-								<Spoken text={script.walkthrough} />
-							</Section>
-						</>
-					)}
-				</div>
-
-				{toast && (
-					<div className="shrink-0 border-t border-white/10 px-4 py-2 text-[12px] text-amber-200">
-						{toast}
-					</div>
-				)}
-			</div>
-		</div>
-	);
+  const [state, setState] = useState<DesktopState | null>(null);
+  const [tab, setTab] = useState<Tab>("workspace");
+  const [feedback, setFeedback] = useState<{
+    text: string;
+    error: boolean;
+  } | null>(null);
+  const [fatal, setFatal] = useState("");
+  const overlay = location.hash === "#overlay";
+  useEffect(() => {
+    document.documentElement.classList.toggle("overlay-mode", overlay);
+    document.body.classList.toggle("overlay-mode", overlay);
+    if (!window.api) {
+      setFatal("请从桌面应用打开CoMind。开发环境请运行 npm run dev。");
+      return;
+    }
+    let received = false;
+    const unsubscribe = window.api.onState((s) => {
+      received = true;
+      setState(s);
+    });
+    void window.api
+      .getState()
+      .then((s) => {
+        if (!received) setState(s);
+      })
+      .catch(() => setFatal("无法连接桌面服务，请重启应用。"));
+    return unsubscribe;
+  }, [overlay]);
+  const run: Run = async (command: Command): Promise<CommandResult> => {
+    try {
+      const result = await window.api.command(command);
+      if (!result.ok || result.text)
+        setFeedback({
+          text: result.error || result.text || "",
+          error: !result.ok,
+        });
+      else if (command.type === "preferences:save") setFeedback(null);
+      return result;
+    } catch {
+      const error = "桌面服务请求失败，请重试";
+      setFeedback({ text: error, error: true });
+      return { ok: false, error };
+    }
+  };
+  if (fatal)
+    return (
+      <div className="empty">
+        <h1>CoMind</h1>
+        <p>{fatal}</p>
+      </div>
+    );
+  if (!state)
+    return (
+      <div className="empty">
+        <Sparkles className="spin" />
+        <p>正在打开CoMind…</p>
+      </div>
+    );
+  if (overlay) return <Overlay state={state} run={run} />;
+  const current = navigation.find((n) => n.id === tab)!;
+  const model = state.models.find((m) => m.id === state.activeModelId);
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">
+            <Sparkles size={25} />
+          </div>
+          <div>
+            <h1>CoMind</h1>
+            <span>你的智能办公助手</span>
+          </div>
+        </div>
+        <div className="nav-label">个人工作空间</div>
+        <nav>
+          {navigation.map(({ id, label, icon: Icon }) => (
+            <button
+              className={id === tab ? "active" : ""}
+              key={id}
+              onClick={() => setTab(id)}
+            >
+              <Icon size={19} />
+              {label}
+              {id === tab && <span className="nav-dot" />}
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-bottom">
+          <div className="model-status">
+            <span className="eyebrow">当前模型</span>
+            <strong>{model?.name || "连接你的 AI 模型"}</strong>
+            <small>{model?.model || "豆包 / DeepSeek / GLM / 自定义"}</small>
+            <button onClick={() => setTab("settings")}>
+              管理模型连接
+              <ArrowUpRight size={14} />
+            </button>
+          </div>
+          <button
+            className="quit-button"
+            onClick={() => void run({ type: "app:quit" })}
+          >
+            <Power size={15} />
+            退出应用
+          </button>
+          <div className="sidebar-footer">
+            LOCAL WORKSPACE <span>v1.0</span>
+          </div>
+        </div>
+      </aside>
+      <div className="main-shell">
+        <header className="topbar">
+          <div>
+            <h2>{current.label}</h2>
+            <p>{current.subtitle}</p>
+          </div>
+          <div className="button-row">
+            <label className="topbar-opacity">
+              悬浮窗不透明度
+              <input
+                aria-label="悬浮窗背景不透明度"
+                type="range"
+                min="25"
+                max="100"
+                step="1"
+                value={Math.round(state.preferences.opacity * 100)}
+                onChange={(e) =>
+                  void run({
+                    type: "preferences:save",
+                    preferences: {
+                      ...state.preferences,
+                      opacity: Number(e.target.value) / 100,
+                    },
+                  })
+                }
+              />
+              <output>{Math.round(state.preferences.opacity * 100)}%</output>
+            </label>
+            <span className="local-pill">
+              <i />
+              本地工作空间
+            </span>
+            <button
+              title="控制悬浮窗"
+              onClick={() => void run({ type: "overlay:toggle" })}
+            >
+              <PanelTop size={17} />
+            </button>
+            {state.runtime.clickThrough && (
+              <button onClick={() => void run({ type: "overlay:penetration" })}>
+                关闭鼠标穿透
+              </button>
+            )}
+          </div>
+        </header>
+        <main className="main-content">
+          {feedback && (
+            <div
+              className={
+                feedback.error
+                  ? "error-box dismissible"
+                  : "info-box dismissible"
+              }
+              role={feedback.error ? "alert" : "status"}
+            >
+              {feedback.text}
+              <button aria-label="关闭提示" onClick={() => setFeedback(null)}>
+                <X size={14} />
+              </button>
+            </div>
+          )}
+          {state.runtime.notice && (
+            <div className="notice">{state.runtime.notice}</div>
+          )}
+          {tab === "workspace" && (
+            <Workspace
+              state={state}
+              run={run}
+              openSettings={() => setTab("settings")}
+            />
+          )}
+          {tab === "materials" && (
+            <Materials initial={state.materials} run={run} />
+          )}
+          {tab === "history" && <History state={state} run={run} />}
+          {tab === "settings" && <Settings state={state} run={run} />}
+          {tab === "shortcuts" && <Shortcuts state={state} run={run} />}
+        </main>
+      </div>
+    </div>
+  );
 }

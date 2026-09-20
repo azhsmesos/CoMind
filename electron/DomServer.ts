@@ -11,12 +11,17 @@
 //   5. Body cap and a request-rate cap.
 
 import http from "node:http";
-import { getSettings, updateSettings } from "./settings";
+export interface PairingStore {
+  get(): { extensionToken: string; extensionPaired: boolean };
+  update(
+    patch: Partial<{ extensionToken: string; extensionPaired: boolean }>,
+  ): void;
+}
 
 export interface DomPayload {
-	title: string;
-	url: string;
-	text: string;
+  title: string;
+  url: string;
+  text: string;
 }
 
 /** Where we start probing. The extension scans this range to find us. */
@@ -32,210 +37,216 @@ const RATE_WINDOW_MS = 60_000;
 const EXTENSION_ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/;
 
 export class DomServer {
-	private server: http.Server | null = null;
-	private port = 0;
-	private armedUntil = 0;
-	private hits: number[] = [];
+  private server: http.Server | null = null;
+  private port = 0;
+  private armedUntil = 0;
+  private hits: number[] = [];
 
-	constructor(
-		private readonly onDom: (payload: DomPayload) => void,
-		private readonly onPaired: () => void = () => {},
-	) {}
+  constructor(
+    private readonly onDom: (payload: DomPayload) => void,
+    private readonly settings: PairingStore,
+    private readonly onPaired: () => void = () => {},
+  ) {}
 
-	/** Binds the first free port in the range. Returns it, or 0 if none. */
-	async start(): Promise<number> {
-		for (let offset = 0; offset < PORT_TRIES; offset++) {
-			const candidate = BASE_PORT + offset;
-			const ok = await this.listen(candidate);
-			if (ok) {
-				this.port = candidate;
-				console.log(`[dom] listening on 127.0.0.1:${candidate}`);
-				return candidate;
-			}
-		}
-		console.error("[dom] no free port in range — extension cannot connect");
-		return 0;
-	}
+  /** Binds the first free port in the range. Returns it, or 0 if none. */
+  async start(): Promise<number> {
+    for (let offset = 0; offset < PORT_TRIES; offset++) {
+      const candidate = BASE_PORT + offset;
+      const ok = await this.listen(candidate);
+      if (ok) {
+        this.port = candidate;
+        console.log(`[dom] listening on 127.0.0.1:${candidate}`);
+        return candidate;
+      }
+    }
+    console.error("[dom] no free port in range — extension cannot connect");
+    return 0;
+  }
 
-	private listen(port: number): Promise<boolean> {
-		return new Promise((resolve) => {
-			const server = http.createServer((req, res) => this.route(req, res));
-			server.once("error", () => resolve(false));
-			server.listen(port, "127.0.0.1", () => {
-				this.server = server;
-				resolve(true);
-			});
-		});
-	}
+  private listen(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const server = http.createServer((req, res) => this.route(req, res));
+      server.once("error", () => resolve(false));
+      server.listen(port, "127.0.0.1", () => {
+        this.server = server;
+        resolve(true);
+      });
+    });
+  }
 
-	/** Opens a single-use 60s window in which the extension may claim the token. */
-	armPairing(): void {
-		this.armedUntil = Date.now() + PAIR_WINDOW_MS;
-		console.log("[dom] pairing armed for 60s");
-	}
+  /** Opens a single-use 60s window in which the extension may claim the token. */
+  armPairing(): void {
+    this.armedUntil = Date.now() + PAIR_WINDOW_MS;
+    console.log("[dom] pairing armed for 60s");
+  }
 
-	get isArmed(): boolean {
-		return Date.now() < this.armedUntil;
-	}
+  get isArmed(): boolean {
+    return Date.now() < this.armedUntil;
+  }
 
-	/**
-	 * First-run setup stays open until something claims the token. After that,
-	 * only an explicit arm window accepts /pair (recovery / re-pair).
-	 */
-	get canPair(): boolean {
-		return this.isArmed || !getSettings().extensionPaired;
-	}
+  /**
+   * First-run setup stays open until something claims the token. After that,
+   * only an explicit arm window accepts /pair (recovery / re-pair).
+   */
+  get canPair(): boolean {
+    return this.isArmed || !this.settings.get().extensionPaired;
+  }
 
-	get listeningPort(): number {
-		return this.port;
-	}
+  get listeningPort(): number {
+    return this.port;
+  }
 
-	stop(): void {
-		this.server?.close();
-		this.server = null;
-	}
+  stop(): void {
+    this.server?.close();
+    this.server = null;
+  }
 
-	private rateLimited(): boolean {
-		const now = Date.now();
-		this.hits = this.hits.filter((at) => now - at < RATE_WINDOW_MS);
-		this.hits.push(now);
-		return this.hits.length > RATE_LIMIT;
-	}
+  private rateLimited(): boolean {
+    const now = Date.now();
+    this.hits = this.hits.filter((at) => now - at < RATE_WINDOW_MS);
+    this.hits.push(now);
+    return this.hits.length > RATE_LIMIT;
+  }
 
-	private route(req: http.IncomingMessage, res: http.ServerResponse): void {
-		const origin = req.headers.origin;
-		const fromExtension =
-			typeof origin === "string" && EXTENSION_ORIGIN.test(origin);
+  private route(req: http.IncomingMessage, res: http.ServerResponse): void {
+    const origin = req.headers.origin;
+    const fromExtension =
+      typeof origin === "string" && EXTENSION_ORIGIN.test(origin);
 
-		if (fromExtension) {
-			res.setHeader("Access-Control-Allow-Origin", origin);
-			res.setHeader("Access-Control-Allow-Headers", "content-type");
-			res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-		}
-		if (req.method === "OPTIONS") {
-			end(res, 204, "");
-			return;
-		}
+    if (fromExtension) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Headers", "content-type");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    }
+    if (req.method === "OPTIONS") {
+      end(res, 204, "");
+      return;
+    }
 
-		const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
-		// Liveness probe. Deliberately unauthenticated and secret-free — it exists
-		// only so the extension can find which port we landed on.
-		if (url.pathname === "/healthz") {
-			json(res, 200, { ok: true });
-			return;
-		}
+    // Liveness probe. Deliberately unauthenticated and secret-free — it exists
+    // only so the extension can find which port we landed on.
+    if (url.pathname === "/healthz") {
+      json(res, 200, { ok: true, app: "comind" });
+      return;
+    }
 
-		if (this.rateLimited()) {
-			json(res, 429, { error: "rate_limited" });
-			return;
-		}
+    if (url.pathname === "/status" && req.method === "GET") {
+      if (
+        !fromExtension ||
+        url.searchParams.get("t") !== this.settings.get().extensionToken
+      ) {
+        json(res, 401, { error: "bad_token" });
+        return;
+      }
+      json(res, 200, { ok: true });
+      return;
+    }
 
-		if (url.pathname === "/pair" && req.method === "POST") {
-			if (!fromExtension) {
-				json(res, 403, { error: "bad_origin" });
-				return;
-			}
-			if (!this.canPair) {
-				json(res, 410, { error: "not_armed" });
-				return;
-			}
-			const firstClaim = !getSettings().extensionPaired;
-			this.armedUntil = 0; // arm window is single-use; first-run soft-open closes too
-			updateSettings({ extensionPaired: true });
-			console.log(
-				`[dom] extension paired${firstClaim ? " (first claim)" : ""}`,
-			);
-			// Respond first so a slow UI handler cannot stall pairing.
-			json(res, 200, { token: getSettings().extensionToken, port: this.port });
-			this.onPaired();
-			return;
-		}
+    if (this.rateLimited()) {
+      json(res, 429, { error: "rate_limited" });
+      return;
+    }
 
-		if (url.pathname === "/dom" && req.method === "POST") {
-			if (!fromExtension) {
-				console.warn(`[dom] rejected /dom: bad origin (${origin ?? "none"})`);
-				json(res, 403, { error: "bad_origin" });
-				return;
-			}
-			if (url.searchParams.get("t") !== getSettings().extensionToken) {
-				console.warn(
-					"[dom] rejected /dom: token mismatch — re-pair the extension",
-				);
-				json(res, 401, { error: "bad_token" });
-				return;
-			}
-			// An already-paired extension delivering successfully closes first-run soft-open
-			// without requiring another /pair round-trip (upgrade path from pre-auto-pair).
-			if (!getSettings().extensionPaired) {
-				updateSettings({ extensionPaired: true });
-			}
-			this.readBody(req, res);
-			return;
-		}
+    if (url.pathname === "/pair" && req.method === "POST") {
+      if (!fromExtension) {
+        json(res, 403, { error: "bad_origin" });
+        return;
+      }
+      if (!this.canPair) {
+        json(res, 410, { error: "not_armed" });
+        return;
+      }
+      const firstClaim = !this.settings.get().extensionPaired;
+      this.armedUntil = 0; // arm window is single-use; first-run soft-open closes too
+      this.settings.update({ extensionPaired: true });
+      console.log(
+        `[dom] extension paired${firstClaim ? " (first claim)" : ""}`,
+      );
+      // Respond first so a slow UI handler cannot stall pairing.
+      json(res, 200, {
+        token: this.settings.get().extensionToken,
+        port: this.port,
+      });
+      this.onPaired();
+      return;
+    }
 
-		console.warn(`[dom] 404 ${req.method} ${url.pathname}`);
-		json(res, 404, { error: "not_found" });
-	}
+    if (url.pathname === "/dom" && req.method === "POST") {
+      if (!fromExtension) {
+        console.warn(`[dom] rejected /dom: bad origin (${origin ?? "none"})`);
+        json(res, 403, { error: "bad_origin" });
+        return;
+      }
+      if (url.searchParams.get("t") !== this.settings.get().extensionToken) {
+        console.warn(
+          "[dom] rejected /dom: token mismatch — re-pair the extension",
+        );
+        json(res, 401, { error: "bad_token" });
+        return;
+      }
+      // An already-paired extension delivering successfully closes first-run soft-open
+      // without requiring another /pair round-trip (upgrade path from pre-auto-pair).
+      if (!this.settings.get().extensionPaired) {
+        this.settings.update({ extensionPaired: true });
+      }
+      this.readBody(req, res);
+      return;
+    }
 
-	private readBody(req: http.IncomingMessage, res: http.ServerResponse): void {
-		let size = 0;
-		const chunks: Buffer[] = [];
-		req.on("data", (chunk: Buffer) => {
-			size += chunk.length;
-			if (size > MAX_BODY_BYTES) {
-				json(res, 413, { error: "too_large" });
-				req.destroy();
-				return;
-			}
-			chunks.push(chunk);
-		});
-		req.on("end", () => {
-			if (res.writableEnded) return;
-			try {
-				const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-				const text = String(body.text ?? "").slice(0, MAX_TEXT_CHARS);
-				if (!text.trim()) {
-					console.warn("[dom] rejected /dom: page had no readable text");
-					json(res, 400, { error: "empty_text" });
-					return;
-				}
-				console.log(
-					`[dom] received ${text.length} chars from ${String(body.url ?? "?")}`,
-				);
-				this.onDom({
-					title: String(body.title ?? "").slice(0, 300),
-					url: String(body.url ?? "").slice(0, 500),
-					text,
-				});
-				json(res, 200, { ok: true });
-			} catch {
-				json(res, 400, { error: "bad_json" });
-			}
-		});
-	}
+    console.warn(`[dom] 404 ${req.method} ${url.pathname}`);
+    json(res, 404, { error: "not_found" });
+  }
+
+  private readBody(req: http.IncomingMessage, res: http.ServerResponse): void {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        json(res, 413, { error: "too_large" });
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (res.writableEnded) return;
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        const text = String(body.text ?? "").slice(0, MAX_TEXT_CHARS);
+        if (!text.trim()) {
+          console.warn("[dom] rejected /dom: page had no readable text");
+          json(res, 400, { error: "empty_text" });
+          return;
+        }
+        console.log(`[dom] received ${text.length} chars`);
+        this.onDom({
+          title: String(body.title ?? "").slice(0, 300),
+          url: String(body.url ?? "").slice(0, 500),
+          text,
+        });
+        json(res, 200, { ok: true });
+      } catch {
+        json(res, 400, { error: "bad_json" });
+      }
+    });
+  }
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
-	end(res, status, JSON.stringify(body), "application/json");
+  end(res, status, JSON.stringify(body), "application/json");
 }
 
 function end(
-	res: http.ServerResponse,
-	status: number,
-	body: string,
-	type?: string,
+  res: http.ServerResponse,
+  status: number,
+  body: string,
+  type?: string,
 ): void {
-	if (type) res.setHeader("Content-Type", type);
-	res.writeHead(status);
-	res.end(body);
-}
-
-/** Creates the persistent pairing token on first run. */
-export function ensureExtensionToken(): string {
-	const existing = getSettings().extensionToken;
-	if (existing) return existing;
-	const token = require("node:crypto").randomBytes(24).toString("base64url");
-	updateSettings({ extensionToken: token });
-	return token;
+  if (type) res.setHeader("Content-Type", type);
+  if (res.writableEnded || res.destroyed) return;
+  res.writeHead(status);
+  res.end(body);
 }
