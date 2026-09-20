@@ -3,6 +3,7 @@ import type { Command, DesktopApi, DesktopState } from "../shared/types";
 const api: DesktopApi = {
   screenshot: {
     frame: () => ipcRenderer.invoke("screenshot:frame"),
+    ready: (loaded) => ipcRenderer.invoke("screenshot:ready", loaded),
     select: (rect) => ipcRenderer.invoke("screenshot:select", rect),
     cancel: () => ipcRenderer.invoke("screenshot:cancel"),
   },

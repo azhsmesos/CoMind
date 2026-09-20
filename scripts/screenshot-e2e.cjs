@@ -24,9 +24,7 @@ async function mainPage(app) {
 }
 
 (async () => {
-  const dir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "comind-screenshot-test-"),
-  );
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comind-screenshot-test-"));
   const requests = [];
   const answer = Object.fromEntries(
     [
@@ -65,6 +63,40 @@ async function mainPage(app) {
   let app;
   try {
     app = await electron.launch({ args: ["."], env });
+    // Hold renderer painting to reproduce the old blank/blue first-frame flash.
+    await app.context().addInitScript(() => {
+      if (location.hash !== "#capture") return;
+      const raf = window.requestAnimationFrame.bind(window);
+      const pending = [];
+      window.requestAnimationFrame = (callback) => {
+        pending.push(callback);
+        return pending.length;
+      };
+      window.releaseScreenshotPaint = () => {
+        window.requestAnimationFrame = raf;
+        for (const callback of pending.splice(0)) raf(callback);
+      };
+    });
+    async function showPreparedPicker(picker) {
+      await picker.waitForURL(/#capture$/);
+      await picker.locator(".screenshot-frame").waitFor();
+      const nativeWindow = await app.browserWindow(picker);
+      assert.equal(
+        await nativeWindow.evaluate((win) => win.isVisible()),
+        false,
+      );
+      await picker.evaluate(() => window.releaseScreenshotPaint());
+      await expect
+        .poll(() => nativeWindow.evaluate((win) => win.isVisible()))
+        .toBe(true);
+      assert.equal(
+        await picker
+          .locator(".screenshot-frame")
+          .evaluate((img) => img.complete && img.naturalWidth > 0),
+        true,
+      );
+      await nativeWindow.dispose();
+    }
     let page = await mainPage(app);
     // Avoid colliding with a separately running development app.
     await page.evaluate(async () => {
@@ -116,8 +148,7 @@ async function mainPage(app) {
       window.api.command({ type: "screenshot:capture" }),
     );
     const unconfiguredPicker = await firstPicker;
-    await unconfiguredPicker.waitForURL(/#capture$/);
-    await unconfiguredPicker.locator(".screenshot-frame").waitFor();
+    await showPreparedPicker(unconfiguredPicker);
     await unconfiguredPicker.mouse.move(500, 360);
     await unconfiguredPicker.mouse.down();
     await unconfiguredPicker.mouse.move(100, 120);
@@ -125,12 +156,17 @@ async function mainPage(app) {
     const missingModelResult = await missingModelCapture;
     assert.equal(missingModelResult.ok, false);
     assert.match(missingModelResult.error, /添加并选择一个模型/);
-    const capturedWithoutModel = await page.evaluate(() => window.api.getState());
+    const capturedWithoutModel = await page.evaluate(() =>
+      window.api.getState(),
+    );
     assert.ok(capturedWithoutModel.sessions[0].rounds[0].image);
     assert.equal(capturedWithoutModel.sessions[0].rounds[0].status, "error");
     assert.equal(capturedWithoutModel.runtime.jobs.screenshot, undefined);
     assert.equal(requests.length, 0);
-    const captureLog = fs.readFileSync(path.join(dir, "screenshot.log"), "utf8");
+    const captureLog = fs.readFileSync(
+      path.join(dir, "screenshot.log"),
+      "utf8",
+    );
     assert.match(captureLog, /框选窗口已显示/);
     assert.match(captureLog, /已选择截图区域/);
     assert.match(captureLog, /ERROR.*添加并选择一个模型/);
@@ -242,9 +278,7 @@ async function mainPage(app) {
     await shortcutInput.press("Tab");
     await expect
       .poll(() =>
-        app.evaluate(({ globalShortcut }) =>
-          globalShortcut.isRegistered("F8"),
-        ),
+        app.evaluate(({ globalShortcut }) => globalShortcut.isRegistered("F8")),
       )
       .toBe(true);
     const untrusted = await page.evaluate(async () => {
@@ -256,6 +290,17 @@ async function mainPage(app) {
       }
     });
     assert.equal(untrusted, true);
+    assert.equal(
+      await page.evaluate(async () => {
+        try {
+          await window.api.screenshot.ready(true);
+          return false;
+        } catch {
+          return true;
+        }
+      }),
+      true,
+    );
     async function startCapture(viaShortcut = false) {
       const pending = app.waitForEvent("window");
       if (viaShortcut) await app.evaluate(() => global.__screenshotShortcut());
@@ -264,9 +309,10 @@ async function mainPage(app) {
           .getByRole("button", { name: "框选截图并解答", exact: true })
           .click();
       const picker = await pending;
-      await picker.waitForURL(/#capture$/);
-      await picker.locator(".screenshot-frame").waitFor();
-      await picker.getByText("CoMind · 框选截图", { exact: true }).waitFor();
+      await showPreparedPicker(picker);
+      await picker
+        .getByText("拖动框选 · 松开自动上传 · Esc 取消", { exact: true })
+        .waitFor();
       return picker;
     }
     let picker = await startCapture();
@@ -303,6 +349,12 @@ async function mainPage(app) {
     await picker.mouse.move(100, 120);
     await picker.mouse.down();
     await picker.mouse.move(500, 360);
+    assert.equal(
+      await picker
+        .locator(".screenshot-selection")
+        .evaluate((el) => getComputedStyle(el).boxShadow),
+      "none",
+    );
     await picker.mouse.up();
     await expect
       .poll(

@@ -42,10 +42,24 @@ export class Screenshot {
   private finish: ((image: string | null, error?: Error) => void) | null = null;
   private busy = false;
   private disposed = false;
-  constructor(private report: (text: string, error?: boolean) => void = () => {}) {
+  private showPicker: (() => void) | null = null;
+  constructor(
+    private report: (text: string, error?: boolean) => void = () => {},
+  ) {
     ipcMain.handle("screenshot:frame", (event) => {
       this.authorize(event);
       return this.frame!.toDataURL();
+    });
+    ipcMain.handle("screenshot:ready", (event, loaded: boolean) => {
+      this.authorize(event);
+      if (loaded === false) {
+        this.finish?.(null, new Error("截图画面加载失败，请重试"));
+      } else if (loaded === true) {
+        this.showPicker?.();
+        this.showPicker = null;
+      } else {
+        throw new Error("无效截图状态");
+      }
     });
     ipcMain.handle(
       "screenshot:select",
@@ -57,7 +71,9 @@ export class Screenshot {
             cropRectangle(rect, size.width, size.height),
           );
           const cropped = image.getSize();
-          this.report(`已选择截图区域：${cropped.width} × ${cropped.height} 像素`);
+          this.report(
+            `已选择截图区域：${cropped.width} × ${cropped.height} 像素`,
+          );
           if (Math.max(cropped.width, cropped.height) > 2560)
             image = image.resize(
               cropped.width >= cropped.height
@@ -99,7 +115,9 @@ export class Screenshot {
     if (this.busy) throw new Error("正在截图，请先完成或按 Esc 取消");
     if (this.disposed) throw new Error("应用正在退出");
     if (process.platform === "darwin")
-      this.report(`屏幕录制权限：${systemPreferences.getMediaAccessStatus("screen")}`);
+      this.report(
+        `屏幕录制权限：${systemPreferences.getMediaAccessStatus("screen")}`,
+      );
     if (
       process.platform === "darwin" &&
       ["denied", "restricted"].includes(
@@ -157,22 +175,30 @@ export class Screenshot {
           movable: false,
           resizable: false,
           hasShadow: false,
-          backgroundColor: "#111827",
+          backgroundColor: "#00000000",
+          transparent: true,
           webPreferences: {
             preload: path.join(__dirname, "preload.js"),
             contextIsolation: true,
             nodeIntegration: false,
             sandbox: true,
+            backgroundThrottling: false,
           },
         });
         this.picker = picker;
         let completed = false;
         const timeout = setTimeout(() => finish(null), 120_000);
+        const loadingTimeout = setTimeout(
+          () => finish(null, new Error("截图画面加载超时，请重试")),
+          10_000,
+        );
         const finish = (image: string | null, error?: Error) => {
           if (completed) return;
           completed = true;
           if (!image && !error) this.report("截图已取消");
           clearTimeout(timeout);
+          clearTimeout(loadingTimeout);
+          this.showPicker = null;
           this.finish = null;
           this.picker = null;
           this.frame = null;
@@ -196,14 +222,16 @@ export class Screenshot {
           }
         });
         picker.on("closed", () => finish(null));
-        picker.once("ready-to-show", () => {
+        // Show only after the renderer has decoded and painted the screen image.
+        this.showPicker = () => {
           if (!picker.isDestroyed()) {
+            clearTimeout(loadingTimeout);
             picker.setBounds(display.bounds);
             picker.show();
             picker.focus();
             this.report("框选窗口已显示，请按住鼠标拖动选择区域");
           }
-        });
+        };
         void loadRenderer(picker, "capture").catch(() =>
           finish(null, new Error("无法打开截图窗口")),
         );
@@ -222,6 +250,7 @@ export class Screenshot {
     this.finish?.(null);
     for (const channel of [
       "screenshot:frame",
+      "screenshot:ready",
       "screenshot:select",
       "screenshot:cancel",
     ])

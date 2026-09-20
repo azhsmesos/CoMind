@@ -55,14 +55,16 @@ function showMain() {
   mainWindow?.show();
   mainWindow?.focus();
 }
-function screenshotLog(text: string, error = false) {
+function screenshotLog(text: string, error = false, detail = false) {
   const entry = { at: new Date().toISOString(), message: text, error };
-  const line = `[screenshot] ${entry.at} ${error ? "ERROR" : "INFO"} ${text}`;
-  error ? console.error(line) : console.info(line);
-  service.runtime.screenshotLog = [
-    ...(service.runtime.screenshotLog || []),
-    entry,
-  ].slice(-20);
+  const line = `[screenshot] ${entry.at} ${error ? "ERROR" : detail ? "DEBUG" : "INFO"} ${text}`;
+  if (!detail || error) {
+    error ? console.error(line) : console.info(line);
+    service.runtime.screenshotLog = [
+      ...(service.runtime.screenshotLog || []),
+      entry,
+    ].slice(-20);
+  }
   const file = path.join(app.getPath("userData"), "screenshot.log");
   service.runtime.screenshotLogPath = file;
   try {
@@ -73,7 +75,7 @@ function screenshotLog(text: string, error = false) {
   } catch {
     console.error("[screenshot] 无法写入本地截图日志");
   }
-  service.changed(false);
+  if (!detail || error) service.changed(false);
 }
 function registerShortcuts() {
   service.runtime.shortcutsRecording = false;
@@ -100,7 +102,7 @@ function registerShortcuts() {
     pair: () => armPairing(),
     screenshot: () => {
       service.runtime.lastScreenshotShortcut = new Date().toISOString();
-      screenshotLog("收到截图快捷键");
+      screenshotLog("收到截图快捷键", false, true);
       void captureQuestion().catch((e) => {
         service.notice(message(e));
         showMain();
@@ -143,7 +145,10 @@ async function captureQuestion() {
     if (sessionId && service.session(sessionId).status !== "ongoing")
       throw new Error("请先继续会话再截图");
     const image = await screenshot.capture([mainWindow, overlay.window]);
-    if (!image || quitting) return;
+    if (!image || quitting) {
+      screenshotLog("截图已取消");
+      return;
+    }
     if (
       service.store.data.activeSessionId !== sessionId ||
       service.store.data.activeModelId !== modelId
@@ -157,7 +162,7 @@ async function captureQuestion() {
     service.runtime.notice = undefined;
     service.changed(false);
     overlay.show();
-    screenshotLog("框选完成，正在保存截图并尝试模型识别");
+    screenshotLog("正在上传截图");
     await service.add(
       "请识别截图中的题目并解答",
       "screenshot",
@@ -303,7 +308,9 @@ else {
       );
       service = new Service(store, broadcast);
       overlay = new OverlayWindow(broadcast);
-      screenshot = new Screenshot(screenshotLog);
+      screenshot = new Screenshot((text, error) =>
+        screenshotLog(text, error, true),
+      );
       dom = new DomServer(
         (payload) => {
           const current = store.data.sessions.find(

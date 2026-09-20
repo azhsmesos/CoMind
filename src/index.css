@@ -1096,7 +1096,7 @@ body.overlay-mode {
   cursor: crosshair;
   user-select: none;
   touch-action: none;
-  background: #111827;
+  background: transparent;
 }
 .screenshot-frame {
   position: absolute;
@@ -1108,20 +1108,19 @@ body.overlay-mode {
 .screenshot-hint {
   position: absolute;
   z-index: 2;
-  top: 24px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 10px 18px;
-  border-radius: 8px;
+  bottom: 16px;
+  left: 16px;
+  padding: 6px 10px;
+  border-radius: 4px;
   color: white;
-  background: #111827e6;
-  font-size: 14px;
+  background: #0009;
+  font-size: 12px;
   white-space: nowrap;
   pointer-events: none;
 }
 .screenshot-selection {
   position: absolute;
-  border: 2px solid #818cf8;
-  box-shadow: 0 0 0 9999px #0006;
+  border: 1px solid white;
+  outline: 1px solid #0008;
   pointer-events: none;
 }

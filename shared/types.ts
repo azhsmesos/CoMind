@@ -175,6 +175,7 @@ export interface CommandResult {
 export interface DesktopApi {
   screenshot: {
     frame(): Promise<string>;
+    ready(loaded: boolean): Promise<void>;
     select(rect: CaptureRect): Promise<CommandResult>;
     cancel(): Promise<void>;
   };

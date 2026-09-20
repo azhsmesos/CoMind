@@ -132,7 +132,7 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
         )}
       </div>
       {!!state.runtime.screenshotLog?.length && (
-        <details className="info-box" open>
+        <details className="info-box">
           <summary>截图日志（最近 20 条）</summary>
           <ol>
             {state.runtime.screenshotLog.map((entry, index) => (
@@ -276,7 +276,7 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
           或右键取消。截图会随会话保存在本机，失败时可在工作台重试。
         </p>
         <p>
-          进入后应看到“CoMind · 框选截图”提示；其他工具的截图不会自动进入CoMind。可先点击下面的按钮确认上传流程。
+          按快捷键后拖动框选，松开鼠标即自动上传，无需额外确认。Esc 或右键取消。
         </p>
         <p>
           可以先框选截图；未配置模型时，截图会保存到会话，配置支持图片输入的模型后可重试识别。macOS

@@ -11,11 +11,14 @@ export function ScreenshotPicker() {
   } | null>(null);
   const start = useRef<{ x: number; y: number } | null>(null);
   const submitting = useRef(false);
+  const presented = useRef(false);
   useEffect(() => {
     void window.api.screenshot
       .frame()
       .then(setFrame)
-      .catch(() => setError("截图加载失败，请按 Esc 取消后重试"));
+      .catch(() => {
+        void window.api.screenshot.ready(false).catch(() => {});
+      });
     const escape = (e: KeyboardEvent) => {
       if (e.key === "Escape") void window.api.screenshot.cancel();
     };
@@ -86,12 +89,28 @@ export function ScreenshotPicker() {
           src={frame}
           alt=""
           draggable={false}
+          onLoad={async (event) => {
+            if (presented.current) return;
+            presented.current = true;
+            try {
+              await event.currentTarget.decode();
+              // Allow a composited frame before revealing the native window.
+              requestAnimationFrame(() =>
+                requestAnimationFrame(() => {
+                  void window.api.screenshot.ready(true).catch(() => {});
+                }),
+              );
+            } catch {
+              void window.api.screenshot.ready(false).catch(() => {});
+            }
+          }}
+          onError={() => {
+            void window.api.screenshot.ready(false).catch(() => {});
+          }}
         />
       )}
       <div className="screenshot-hint" role="status">
-        <strong>CoMind · 框选截图</strong>
-        <br />
-        {error || "拖动框选题目 · 松开后自动发送给当前 AI · Esc / 右键取消"}
+        {error || "拖动框选 · 松开自动上传 · Esc 取消"}
       </div>
       {rect && (
         <div
