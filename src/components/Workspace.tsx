@@ -1,3 +1,5 @@
+import { MobileShare } from "./MobileShare";
+import { VoicePanel } from "./Voice";
 import { useEffect, useState } from "react";
 import {
   Play,
@@ -120,6 +122,8 @@ export function Workspace({
             : "支持网页采集与手动输入"}
         </span>
       </div>
+      <MobileShare state={state} run={run} />
+      <VoicePanel state={state} run={run} />
       {!session ? (
         <section className="card start-session">
           <div className="start-icon">
@@ -220,12 +224,12 @@ export function Workspace({
             onClick={() => void run({ type: "screenshot:capture" })}
           >
             <Camera size={16} />
-            {state.runtime.jobs.screenshot || "框选截图并解答"}
+            {state.runtime.jobs.screenshot || "截图并自动解答"}
           </button>
           {round?.image && (
             <details className="screenshot-preview">
               <summary>查看题目截图</summary>
-              <img src={round.image} alt="当前题目的框选截图" />
+              <img src={round.image} alt="当前题目的整屏截图" />
             </details>
           )}
           {session?.status === "paused" && (
@@ -248,7 +252,9 @@ export function Workspace({
                       ? "网页采集"
                       : r.source === "screenshot"
                         ? "截图采集"
-                        : "手动输入"}{" "}
+                        : r.source === "voice"
+                          ? "会议语音"
+                          : "手动输入"}{" "}
                     ·{" "}
                     {r.status === "done"
                       ? "已生成"
@@ -287,7 +293,11 @@ export function Workspace({
                       try {
                         const result = await run({
                           type: "clipboard:write",
-                          text: Object.values(round.answer!).join("\n\n"),
+                          text: Object.entries(round.answer!)
+                            .filter(([key]) => key !== "kind")
+                            .map(([, value]) => value)
+                            .filter(Boolean)
+                            .join("\n\n"),
                         });
                         if (!result.ok) return;
                         setCopied(true);
@@ -327,7 +337,10 @@ export function Workspace({
           )}
           {round?.error && (
             <div className="error-box" role="alert">
-              {round.error}
+              上次生成失败：{round.error}
+              {model?.hasKey && (
+                <p>当前模型已配置密钥，点击「重新生成」可重试本题。</p>
+              )}
             </div>
           )}
           {round?.answer ? (

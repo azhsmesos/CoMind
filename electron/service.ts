@@ -9,6 +9,7 @@ import type {
   Session,
 } from "../shared/types";
 import { Store } from "./store";
+import { parseResume } from "./resume";
 import {
   callModel,
   evaluateSession,
@@ -26,6 +27,14 @@ export class Service {
     private generate = generateAnswer,
   ) {
     this.runtime = {
+      mobile: { enabled: false, addresses: [], clients: 0 },
+      voice: {
+        status: "stopped",
+        partial: "",
+        level: 0,
+        queued: 0,
+        autoAnswer: store.voiceConfig().autoAnswer,
+      },
       port: 0,
       paired: store.data.extensionPaired,
       overlayVisible: false,
@@ -186,6 +195,7 @@ export class Service {
     source: Round["source"] = "manual",
     url?: string,
     image?: string,
+    onCreated?: (round: Round) => void,
   ) {
     if (image) validateImage(image);
     const question = validText(text, 25000);
@@ -204,6 +214,7 @@ export class Service {
       status: "idle",
     };
     s.rounds.push(r);
+    onCreated?.(r);
     delete s.evaluation;
     this.changed();
     try {
@@ -280,6 +291,12 @@ export class Service {
         validateMaterials(c.materials);
         this.store.data.materials = structuredClone(c.materials);
         break;
+      case "materials:import-resume": {
+        const config = this.model();
+        return this.job("material:resume-import", "正在解析简历", (signal) =>
+          parseResume(config, c.upload, signal),
+        );
+      }
       case "materials:optimize": {
         if (!["resume", "jd"].includes(c.field))
           throw new Error("无效资料类型");
@@ -322,6 +339,7 @@ export class Service {
         break;
       }
       case "session:delete":
+        this.store.transcripts.delete(c.id);
         this.session(c.id).status = "completed";
         this.session(c.id).pending = [];
         this.cancelSession(c.id);
@@ -432,7 +450,18 @@ export function validatePreferences(p: Preferences) {
     throw new Error("设置参数无效");
   if (
     !p.shortcuts ||
-    !["generate", "overlay", "penetration", "pair", "screenshot"].every(
+    ![
+      "generate",
+      "overlay",
+      "penetration",
+      "pair",
+      "screenshot",
+      "quit",
+      "scrollUp",
+      "scrollDown",
+      "scrollLeft",
+      "scrollRight",
+    ].every(
       (k) =>
         typeof p.shortcuts[k as keyof typeof p.shortcuts] === "string" &&
         p.shortcuts[k as keyof typeof p.shortcuts].length < 100,
@@ -482,7 +511,7 @@ export function sessionMarkdown(s: Session) {
         lines.push(
           `### ${label}`,
           "",
-          r.answer[key as keyof typeof r.answer],
+          r.answer[key as keyof typeof r.answer] || "",
           "",
         );
   }

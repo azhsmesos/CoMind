@@ -43,11 +43,34 @@ test("Fn function keys normalize, duplicate shortcuts rejected, old preferences 
   assert.throws(() => normalizeShortcut("Fn+A"), /Fn/);
   const store = setup(t);
   delete store.data.preferences.shortcuts.screenshot;
+  for (const key of ["scrollUp", "scrollDown", "scrollLeft", "scrollRight"])
+    delete store.data.preferences.shortcuts[key];
+  store.data.preferences.shortcuts.penetration = "Control+Alt+F7";
   store.save();
   const restored = new Store(store["file"], cipher);
   assert.equal(
     restored.data.preferences.shortcuts.screenshot,
     "CommandOrControl+Shift+S",
+  );
+  assert.equal(
+    restored.data.preferences.shortcuts.scrollUp,
+    "CommandOrControl+Alt+Up",
+  );
+  assert.equal(
+    restored.data.preferences.shortcuts.scrollDown,
+    "CommandOrControl+Alt+Down",
+  );
+  assert.equal(
+    restored.data.preferences.shortcuts.scrollLeft,
+    "CommandOrControl+Alt+Left",
+  );
+  assert.equal(
+    restored.data.preferences.shortcuts.scrollRight,
+    "CommandOrControl+Alt+Right",
+  );
+  assert.equal(
+    restored.data.preferences.shortcuts.penetration,
+    "Control+Alt+F7",
   );
   const service = new Service(restored, () => {});
   const preferences = structuredClone(restored.data.preferences);
@@ -56,6 +79,20 @@ test("Fn function keys normalize, duplicate shortcuts rejected, old preferences 
   assert.equal(restored.data.preferences.shortcuts.screenshot, "F2");
   preferences.shortcuts.screenshot = preferences.shortcuts.overlay;
   assert.throws(() => validatePreferences(preferences), /相同快捷键/);
+});
+test("new scroll defaults preserve existing custom shortcuts and explicit disabling", (t) => {
+  const store = setup(t);
+  delete store.data.preferences.shortcuts.scrollDown;
+  store.data.preferences.shortcuts.screenshot = "CommandOrControl+Alt+Down";
+  store.data.preferences.shortcuts.scrollUp = "";
+  store.save();
+  const restored = new Store(store["file"], cipher);
+  assert.equal(
+    restored.data.preferences.shortcuts.screenshot,
+    "CommandOrControl+Alt+Down",
+  );
+  assert.equal(restored.data.preferences.shortcuts.scrollDown, "");
+  assert.equal(restored.data.preferences.shortcuts.scrollUp, "");
 });
 test("screenshots use actual multimodal wire format for both protocols", async (t) => {
   const requests = [];
@@ -163,26 +200,6 @@ test("image-incompatible model errors are actionable", async (t) => {
     /支持视觉输入/,
   );
 });
-test("crop coordinates preserve display scale and reject invalid or tiny selection", () => {
-  const { cropRectangle } = require("../dist-electron/electron/Screenshot");
-  assert.deepEqual(
-    cropRectangle({ x: 0.25, y: 0.1, width: 0.5, height: 0.4 }, 2000, 1000),
-    { x: 500, y: 100, width: 1000, height: 400 },
-  );
-  assert.throws(
-    () => cropRectangle({ x: 0.9, y: 0, width: 0.2, height: 1 }, 2000, 1000),
-    /无效/,
-  );
-  assert.throws(
-    () => cropRectangle({ x: 0, y: 0, width: NaN, height: 1 }, 2000, 1000),
-    /无效/,
-  );
-  assert.throws(
-    () =>
-      cropRectangle({ x: 0, y: 0, width: 0.001, height: 0.001 }, 2000, 1000),
-    /太小/,
-  );
-});
 function setup(t, available = true) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comind-core-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -202,6 +219,189 @@ function model(store) {
     apiKey: "test-secret-only",
   });
 }
+test("DeepSeek defaults persist, preserve credentials on edit and allow custom model IDs", (t) => {
+  const store = setup(t);
+  const config = {
+    id: "deepseek",
+    ...PRESETS.deepseek,
+    provider: "deepseek",
+    protocol: "openai",
+    model: " ",
+    apiKey: "synthetic-deepseek-key",
+  };
+  store.saveModel(config);
+  const restored = new Store(store["file"], cipher);
+  assert.equal(restored.models()[0].model, "deepseek-flash");
+  assert.equal(restored.models()[0].baseUrl, "https://api.deepseek.com");
+  assert.equal(restored.data.activeModelId, "deepseek");
+  restored.saveModel({ ...config, model: "custom-model-id", apiKey: "" });
+  assert.equal(restored.models()[0].model, "custom-model-id");
+  assert.equal(restored.key("deepseek"), "synthetic-deepseek-key");
+  assert.ok(
+    !JSON.stringify(restored.snapshot({})).includes("synthetic-deepseek-key"),
+  );
+  assert.throws(
+    () => store.saveModel({ ...config, provider: "custom", model: "" }),
+    /模型 ID/,
+  );
+});
+test("DeepSeek text and screenshot rounds use the official endpoint, bearer auth and vision blocks", async (t) => {
+  const store = setup(t);
+  store.saveModel({
+    id: "deepseek",
+    ...PRESETS.deepseek,
+    provider: "deepseek",
+    protocol: "openai",
+    apiKey: "synthetic-deepseek-key",
+  });
+  const requests = [];
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    requests.push({
+      url,
+      headers: options.headers,
+      body: JSON.parse(options.body),
+    });
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              reasoning_content: "This is not the answer",
+              content: JSON.stringify(answer),
+            },
+          },
+        ],
+      }),
+    );
+  });
+  const service = new Service(store, () => {});
+  await service.add("解释哈希表");
+  const image =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+  await service.add("请识别截图", "screenshot", undefined, image);
+  assert.equal(requests.length, 2);
+  for (const request of requests) {
+    assert.equal(request.url, "https://api.deepseek.com/chat/completions");
+    assert.equal(
+      request.headers.Authorization,
+      "Bearer synthetic-deepseek-key",
+    );
+    assert.equal(request.body.model, "deepseek-flash");
+    assert.equal(request.body.stream, false);
+    assert.equal(typeof request.body.messages[0].content, "string");
+  }
+  assert.equal(
+    JSON.parse(requests[0].body.messages[1].content).question,
+    "解释哈希表",
+  );
+  const vision = requests[1].body.messages[1];
+  assert.equal(vision.role, "user");
+  assert.equal(vision.content[0].type, "text");
+  assert.equal(JSON.parse(vision.content[0].text).question, "请识别截图");
+  assert.deepEqual(vision.content[1], {
+    type: "image_url",
+    image_url: { url: image },
+  });
+  assert.deepEqual(
+    store.data.sessions[0].rounds.map((r) => r.status),
+    ["done", "done"],
+  );
+  assert.equal(store.data.sessions[0].rounds[1].question, answer.problem);
+  assert.deepEqual(store.data.sessions[0].rounds[1].answer, answer);
+});
+test("malformed DeepSeek keys cannot overwrite a saved working credential", (t) => {
+  const store = setup(t);
+  const config = {
+    id: "deepseek",
+    ...PRESETS.deepseek,
+    provider: "deepseek",
+    protocol: "openai",
+    apiKey: "synthetic-original-key",
+  };
+  store.saveModel(config);
+  for (const apiKey of [
+    "Bearer sk-test",
+    '"sk-test"',
+    "sk-***123",
+    "sk-…123",
+    "sk-...123",
+    "sk-\u200Btest",
+    "sk-test\ninside",
+  ]) {
+    assert.throws(() => store.saveModel({ ...config, apiKey }), /API Key 格式/);
+    assert.equal(store.key(config.id), config.apiKey);
+  }
+  store.saveModel({ ...config, apiKey: "  synthetic-replacement-key\n" });
+  assert.equal(store.key(config.id), "synthetic-replacement-key");
+});
+test("DeepSeek distinguishes authentication from forbidden access without exposing server response or key", async (t) => {
+  let status = 401;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async () => new Response("secret-server-response", { status }),
+  );
+  t.mock.method(console, "warn", () => {});
+  const config = {
+    ...PRESETS.deepseek,
+    provider: "deepseek",
+    protocol: "openai",
+    apiKey: "synthetic-private-key",
+  };
+  for (const code of [401, 403]) {
+    status = code;
+    await assert.rejects(
+      callModel(config, "s", "u", new AbortController().signal),
+      (e) => {
+        assert.match(e.message, new RegExp(`HTTP ${code}`));
+        assert.match(
+          e.message,
+          code === 401 ? /DeepSeek.*重新填写/ : /访问被拒绝/,
+        );
+        assert.ok(!e.message.includes(config.apiKey));
+        assert.ok(!e.message.includes("secret-server-response"));
+        return true;
+      },
+    );
+  }
+  assert.deepEqual(
+    console.warn.mock.calls.map((c) => c.arguments),
+    [["[llm] 模型请求失败 · HTTP 401"], ["[llm] 模型请求失败 · HTTP 403"]],
+  );
+});
+test("DeepSeek reports insufficient balance and actionable vision errors without leaking response data", async (t) => {
+  let status = 402;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async () => new Response("secret-response", { status }),
+  );
+  const config = {
+    ...PRESETS.deepseek,
+    provider: "deepseek",
+    protocol: "openai",
+    apiKey: "synthetic",
+  };
+  await assert.rejects(
+    callModel(config, "s", "u", new AbortController().signal),
+    /余额不足/,
+  );
+  status = 400;
+  await assert.rejects(
+    callModel(
+      config,
+      "s",
+      "u",
+      new AbortController().signal,
+      "data:image/png;base64,aGVsbG8=",
+    ),
+    (e) =>
+      /deepseek-flash/.test(e.message) &&
+      /截图已保留/.test(e.message) &&
+      !e.message.includes("secret"),
+  );
+});
 async function server(t, handler) {
   const s = http.createServer(handler);
   await new Promise((r) => s.listen(0, "127.0.0.1", r));
@@ -462,10 +662,7 @@ test("DOM service first pairing, recovery, port probing, origin/token and empty-
       headers: { Origin: tokenOrigin, "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-  assert.equal(
-    (await (await fetch(base + "/healthz")).json()).app,
-    "comind",
-  );
+  assert.equal((await (await fetch(base + "/healthz")).json()).app, "comind");
   assert.equal((await post("/pair", {}, "https://evil.example")).status, 403);
   assert.equal((await post("/pair", {})).status, 200);
   assert.equal(data.extensionPaired, true);
@@ -535,4 +732,26 @@ test("non-JSON success response never leaks service response contents", async (t
     (error) =>
       error.message.includes("非 JSON") && !error.message.includes("secret"),
   );
+});
+
+test("quit shortcut upgrades old settings without overriding custom or disabled bindings", (t) => {
+  const store = setup(t);
+  assert.equal(store.data.preferences.shortcuts.quit, "Control+C");
+  delete store.data.preferences.shortcuts.quit;
+  store.save();
+  let loaded = new Store(store["file"], cipher);
+  assert.equal(loaded.data.preferences.shortcuts.quit, "Control+C");
+  delete loaded.data.preferences.shortcuts.quit;
+  loaded.data.preferences.shortcuts.screenshot = "Control+C";
+  loaded.save();
+  loaded = new Store(store["file"], cipher);
+  assert.equal(loaded.data.preferences.shortcuts.quit, "");
+  assert.equal(loaded.data.preferences.shortcuts.screenshot, "Control+C");
+  loaded.data.preferences.shortcuts.quit = "Control+Alt+Q";
+  loaded.save();
+  loaded = new Store(store["file"], cipher);
+  assert.equal(loaded.data.preferences.shortcuts.quit, "Control+Alt+Q");
+  loaded.data.preferences.shortcuts.quit = "";
+  loaded.save();
+  assert.equal(new Store(store["file"], cipher).data.preferences.shortcuts.quit, "");
 });

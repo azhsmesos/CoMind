@@ -18,7 +18,22 @@ import { Service, message, sessionMarkdown } from "./service";
 import { DomServer } from "./DomServer";
 import { OverlayWindow, loadRenderer } from "./OverlayWindow";
 import { Screenshot } from "./Screenshot";
+import { AudioCapture } from "./audio-capture";
+import { MobileServer } from "./mobile-server";
+import { Voice } from "./voice";
 import type { Command, CommandResult } from "../shared/types";
+
+// Use ScreenCaptureKit system-audio permission instead of a terminal-dependent CoreAudio Tap plist.
+if (process.platform === "darwin") {
+  const flags = app.commandLine
+    .getSwitchValue("disable-features")
+    .split(",")
+    .filter(Boolean);
+  app.commandLine.appendSwitch(
+    "disable-features",
+    [...new Set([...flags, "MacCatapLoopbackAudioForScreenShare"])].join(","),
+  );
+}
 
 // Preserve the existing profile and extension path across the brand upgrade.
 // Keep the bundle ID stable for existing installations.
@@ -38,14 +53,21 @@ if (
 let mainWindow: BrowserWindow | null = null;
 let overlay: OverlayWindow;
 let screenshot: Screenshot;
+let audio: AudioCapture;
+let voice: Voice;
 let tray: Tray | null = null;
 let service: Service;
 let dom: DomServer;
+let mobile: MobileServer;
 let quitting = false;
 function broadcast() {
   if (!service) return;
   service.runtime.overlayVisible = overlay?.visible || false;
   service.runtime.clickThrough = overlay?.clickThrough || false;
+  if (mobile) {
+    service.runtime.mobile = mobile.state;
+    mobile.publish();
+  }
   const state = service.state();
   for (const win of [mainWindow, overlay?.window])
     if (win && !win.isDestroyed())
@@ -99,7 +121,12 @@ function registerShortcuts() {
     },
     overlay: () => overlay.toggle(),
     penetration: () => overlay.togglePenetration(),
+    scrollUp: () => overlay.scroll("up"),
+    scrollDown: () => overlay.scroll("down"),
+    scrollLeft: () => overlay.scroll("left"),
+    scrollRight: () => overlay.scroll("right"),
     pair: () => armPairing(),
+    quit: () => app.quit(),
     screenshot: () => {
       service.runtime.lastScreenshotShortcut = new Date().toISOString();
       screenshotLog("收到截图快捷键", false, true);
@@ -139,12 +166,12 @@ async function captureQuestion() {
   }
   const sessionId = service.store.data.activeSessionId;
   const modelId = service.store.data.activeModelId;
-  service.runtime.jobs.screenshot = "正在框选截图…";
+  service.runtime.jobs.screenshot = "正在截取当前屏幕…";
   screenshotLog("开始截图");
   try {
     if (sessionId && service.session(sessionId).status !== "ongoing")
       throw new Error("请先继续会话再截图");
-    const image = await screenshot.capture([mainWindow, overlay.window]);
+    const image = await screenshot.capture();
     if (!image || quitting) {
       screenshotLog("截图已取消");
       return;
@@ -158,10 +185,10 @@ async function captureQuestion() {
       throw new Error("会话已暂停或结束，截图未发送");
     service.runtime.jobs.screenshot = "正在上传截图并解答…";
     service.runtime.lastCapture = new Date().toISOString();
-    service.runtime.lastPage = "框选截图";
+    service.runtime.lastPage = "整屏截图";
     service.runtime.notice = undefined;
     service.changed(false);
-    overlay.show();
+    if (!overlay.visible) overlay.show();
     screenshotLog("正在上传截图");
     await service.add(
       "请识别截图中的题目并解答",
@@ -205,7 +232,47 @@ function allowed(event: Electron.IpcMainInvokeEvent) {
 async function command(c: Command): Promise<CommandResult> {
   try {
     if (!c || typeof c.type !== "string") throw new Error("无效操作");
+    if (
+      (["session:pause", "session:end", "session:delete"].includes(c.type) &&
+        "id" in c &&
+        c.id === service.runtime.voice.sessionId) ||
+      ["model:select", "model:delete", "model:save"].includes(c.type)
+    )
+      voice.stop();
     switch (c.type) {
+      case "mobile:start":
+        if (c.address !== undefined && typeof c.address !== "string") throw new Error("无效网络地址");
+        await mobile.start(c.address);
+        return { ok: true };
+      case "mobile:stop":
+        mobile.stop();
+        return { ok: true };
+      case "mobile:reset":
+        mobile.reset();
+        return { ok: true };
+      case "mobile:refresh":
+        mobile.refresh();
+        return { ok: true };
+      case "voice:save":
+        service.store.saveVoice(c.workspaceId, c.apiKey);
+        voice.stop();
+        service.changed();
+        return { ok: true, text: "语音连接已保存" };
+      case "voice:test":
+        return { ok: true, text: await voice.test() };
+      case "voice:start":
+        await voice.start();
+        return { ok: true };
+      case "voice:stop":
+        voice.stop();
+        return { ok: true };
+      case "voice:auto":
+        voice.auto(c.enabled);
+        return { ok: true };
+      case "voice:answer":
+        await voice.answer(c.sessionId, c.transcriptId);
+        return { ok: true };
+
       case "shortcuts:record":
         if (typeof c.recording !== "boolean")
           throw new Error("无效快捷键录入状态");
@@ -250,7 +317,13 @@ async function command(c: Command): Promise<CommandResult> {
           filters: [{ name: "Markdown", extensions: ["md"] }],
         });
         if (!result.canceled && result.filePath)
-          fs.writeFileSync(result.filePath, sessionMarkdown(session), "utf8");
+          fs.writeFileSync(
+            result.filePath,
+            sessionMarkdown(session) +
+              "\n\n## 会议转写\n\n" +
+              service.store.transcripts.markdown(session.id),
+            "utf8",
+          );
         return { ok: true, text: result.canceled ? "已取消导出" : "导出成功" };
       }
       default: {
@@ -289,9 +362,19 @@ function secureWindow(win: BrowserWindow) {
     (_webContents, _permission, callback) => callback(false),
   );
 }
-if (!app.requestSingleInstanceLock()) app.quit();
-else {
-  app.on("second-instance", showMain);
+console.info(
+  `[app] 正在启动 CoMind · PID ${process.pid} · ${app.isPackaged ? "安装版" : process.env.NODE_ENV || "本地运行"}`,
+);
+if (!app.requestSingleInstanceLock()) {
+  console.warn(
+    "[app] CoMind 已有实例正在运行，已请求打开原窗口，本次启动退出。关闭窗口只会隐藏到托盘；如需重新启动并在当前终端查看日志，请先从 CoMind 菜单或托盘选择「退出」，再运行 npm run dev。",
+  );
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    console.info("[app] 收到重复启动请求，正在显示已有窗口");
+    showMain();
+  });
   app
     .whenReady()
     .then(async () => {
@@ -307,7 +390,12 @@ else {
         },
       );
       service = new Service(store, broadcast);
+      mobile = new MobileServer(() => store.data, path.join(app.getAppPath(), "dist-mobile"), broadcast);
       overlay = new OverlayWindow(broadcast);
+      audio = new AudioCapture();
+      voice = new Voice(service, audio, undefined, undefined, () => {
+        if (!overlay.visible) overlay.show();
+      });
       screenshot = new Screenshot((text, error) =>
         screenshotLog(text, error, true),
       );
@@ -354,6 +442,17 @@ else {
           nodeIntegration: false,
           sandbox: true,
         },
+      });
+      ipcMain.handle("voice:transcripts", (event, sessionId, before) => {
+        if (!allowed(event)) throw new Error("不允许的请求");
+        if (
+          typeof sessionId !== "string" ||
+          (before !== undefined &&
+            (!Number.isSafeInteger(before) || before < 0))
+        )
+          throw new Error("无效转写查询");
+        service.session(sessionId);
+        return service.store.transcripts.page(sessionId, before);
       });
       ipcMain.handle("desktop:state", (event) => {
         if (!allowed(event)) throw new Error("不允许的请求");
@@ -443,6 +542,11 @@ else {
         service.notice("扩展服务端口被占用，手动输入仍可使用");
       registerShortcuts();
       await loadRenderer(mainWindow);
+      console.info("[app] CoMind 已就绪，主进程日志输出到本终端");
+      console.info(
+        "[app] 截图详细日志：" +
+          path.join(app.getPath("userData"), "screenshot.log"),
+      );
       if (process.env.COMIND_SMOKE === "1") {
         await mainWindow.webContents.executeJavaScript(
           `new Promise(resolve => { const check = () => document.body.innerText.includes('智能工作台') ? resolve(true) : setTimeout(check, 50); check(); })`,
@@ -476,7 +580,11 @@ else {
     });
   app.on("activate", showMain);
   app.on("before-quit", () => {
+    console.info("[app] 正在退出 CoMind，释放快捷键和扩展服务");
     quitting = true;
+    mobile?.stop();
+    voice?.dispose();
+    audio?.dispose();
     service?.dispose();
     globalShortcut.unregisterAll();
     dom?.stop();
@@ -488,3 +596,4 @@ else {
     if (!tray) app.quit();
   });
 }
+app.on("will-quit", () => console.info("[app] CoMind 已退出"));

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   Plus,
   Trash2,
@@ -7,7 +7,9 @@ import {
   Save,
   Sparkles,
   BookOpen,
+  Upload,
 } from "lucide-react";
+import { prepareResume } from "../resume-upload";
 import type { Materials as MaterialState, MaterialItem } from "../types";
 import type { Run } from "./Models";
 export function Materials({
@@ -23,6 +25,30 @@ export function Materials({
   );
   const [busy, setBusy] = useState("");
   const [saved, setSaved] = useState(false);
+  const uploadInput = useRef<HTMLInputElement>(null);
+  const [uploadStatus, setUploadStatus] = useState("");
+  const [uploadError, setUploadError] = useState("");
+  async function importResume(file: File) {
+    setBusy("import");
+    setUploadError("");
+    setUploadStatus("正在读取简历…");
+    try {
+      const upload = await prepareResume(file, setUploadStatus);
+      setUploadStatus("AI 正在解析简历…");
+      const result = await run({ type: "materials:import-resume", upload });
+      if (!result.ok) throw new Error(result.error || "简历解析失败");
+      if (!result.text) throw new Error("简历解析已取消，请重试");
+      change({ resume: result.text });
+      setUploadStatus("解析完成，请检查内容后点击「保存资料」。");
+    } catch (error) {
+      setUploadStatus("");
+      setUploadError(
+        error instanceof Error ? error.message : "简历解析失败，请重试",
+      );
+    } finally {
+      setBusy("");
+    }
+  }
   function change(patch: Partial<MaterialState>) {
     setDraft((d) => ({ ...d, ...patch }));
     setSaved(false);
@@ -42,7 +68,10 @@ export function Materials({
   async function save() {
     setBusy("save");
     const r = await run({ type: "materials:save", materials: draft });
-    if (r.ok) setSaved(true);
+    if (r.ok) {
+      setSaved(true);
+      setUploadStatus("");
+    }
     setBusy("");
   }
   return (
@@ -89,27 +118,71 @@ export function Materials({
             <section className="card" key={key}>
               <div className="section-heading">
                 <h3>{title}</h3>
-                <button
-                  disabled={!!busy || !draft[key].trim()}
-                  onClick={async () => {
-                    setBusy(key);
-                    const r = await run({
-                      type: "materials:optimize",
-                      field: key,
-                      text: draft[key],
-                    });
-                    if (r.ok && r.text) change({ [key]: r.text });
-                    setBusy("");
-                  }}
-                >
-                  <Sparkles size={14} />
-                  {busy === key ? "整理中…" : "AI 整理"}
-                </button>
+                <div className="button-row">
+                  {key === "resume" && (
+                    <>
+                      <input
+                        ref={uploadInput}
+                        type="file"
+                        hidden
+                        aria-label="上传简历文件"
+                        accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.webp,.gif"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          e.target.value = "";
+                          if (file) void importResume(file);
+                        }}
+                      />
+                      <button
+                        disabled={!!busy}
+                        onClick={() => uploadInput.current?.click()}
+                      >
+                        <Upload size={14} />
+                        {busy === "import" ? "解析中…" : "上传并解析"}
+                      </button>
+                    </>
+                  )}
+                  <button
+                    disabled={!!busy || !draft[key].trim()}
+                    onClick={async () => {
+                      setBusy(key);
+                      const r = await run({
+                        type: "materials:optimize",
+                        field: key,
+                        text: draft[key],
+                      });
+                      if (r.ok && r.text) change({ [key]: r.text });
+                      setBusy("");
+                    }}
+                  >
+                    <Sparkles size={14} />
+                    {busy === key ? "整理中…" : "AI 整理"}
+                  </button>
+                </div>
               </div>
+              {key === "resume" && (
+                <>
+                  <p className="muted resume-upload-hint">
+                    支持 PDF（含扫描版）、Word、图片；最大 20 MB，PDF 最多 10
+                    页。内容会发送给当前模型解析。
+                  </p>
+                  {uploadStatus && (
+                    <p role="status" className="info-box">
+                      {uploadStatus}
+                    </p>
+                  )}
+                  {uploadError && (
+                    <p role="alert" className="error-box">
+                      {uploadError}
+                    </p>
+                  )}
+                </>
+              )}
               <textarea
                 aria-label={title}
                 rows={18}
                 maxLength={50000}
+                disabled={key === "resume" && busy === "import"}
                 value={draft[key]}
                 onChange={(e) => change({ [key]: e.target.value })}
                 placeholder={placeholder}

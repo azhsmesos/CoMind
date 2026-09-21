@@ -1,3 +1,4 @@
+import { TranscriptList } from "./Voice";
 import { useState } from "react";
 import {
   Download,
@@ -69,6 +70,10 @@ export function History({ state, run }: { state: DesktopState; run: Run }) {
                   </button>
                 </div>
               </div>
+              <details className="voice-history">
+                <summary>会议转写记录</summary>
+                <TranscriptList session={session} run={run} />
+              </details>
               <button
                 className="primary"
                 disabled={

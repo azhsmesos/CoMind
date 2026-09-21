@@ -1,10 +1,8 @@
 import { BrowserWindow, screen } from "electron";
 import path from "node:path";
-export function loadRenderer(
-  win: BrowserWindow,
-  overlay: boolean | "capture" = false,
-) {
-  const hash = overlay === "capture" ? "capture" : overlay ? "overlay" : "";
+import type { OverlayScrollDirection } from "../shared/types";
+export function loadRenderer(win: BrowserWindow, overlay = false) {
+  const hash = overlay ? "overlay" : "";
   if (
     !require("electron").app.isPackaged &&
     process.env.NODE_ENV === "development"
@@ -69,6 +67,10 @@ export class OverlayWindow {
     this.clickThrough = !this.clickThrough;
     this.window?.setIgnoreMouseEvents(this.clickThrough, { forward: true });
     this.changed();
+  }
+  scroll(direction: OverlayScrollDirection) {
+    if (this.visible && this.window && !this.window.isDestroyed())
+      this.window.webContents.send("overlay:scroll", direction);
   }
   protect(value: boolean) {
     this.window?.setContentProtection(value);

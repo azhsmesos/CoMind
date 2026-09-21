@@ -4,6 +4,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { docxFixture, pdfFixture } = require("../tests/resume-fixtures.cjs");
 async function mainPage(app) {
   for (let i = 0; i < 300; i++) {
     const page = (await app.windows()).find((p) =>
@@ -21,12 +22,15 @@ async function mainPage(app) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comind-e2e-"));
   fs.mkdirSync("test-results", { recursive: true });
   const requests = [];
+  let resumeCount = 0;
+  let resumeFailure = false;
   const answer = {
+    kind: "algorithm",
     summary: "使用哈希表记录已访问元素，单次遍历找到目标组合。",
     problem: "给定数组与目标值，返回两个数的下标。",
     clarify: "是否保证恰好存在一个解？",
     approach: "先考虑双重循环，再用哈希表将查找降为常数时间。",
-    code: "def two_sum(nums, target):\n    seen = {}\n    for i, value in enumerate(nums):\n        if target - value in seen:\n            return [seen[target - value], i]\n        seen[value] = i",
+    code: "import java.util.HashMap;\nimport java.util.Map;\n\nclass Solution {\n    public int[] twoSum(int[] nums, int target) {\n        Map<Integer, Integer> seen = new HashMap<>();\n        for (int i = 0; i < nums.length; i++) {\n            int complement = target - nums[i];\n            if (seen.containsKey(complement)) {\n                return new int[] {seen.get(complement), i};\n            }\n            seen.put(nums[i], i);\n        }\n        return new int[0];\n    }\n}",
     walkthrough: "例如 [2, 7, 11, 15]，目标为 9，遍历到 7 时找到 2。",
     time_complexity: "O(n)",
     space_complexity: "O(n)",
@@ -58,6 +62,16 @@ async function mainPage(app) {
         });
       else if (system.includes("整理用户"))
         text = JSON.stringify({ text: "整理后的测试简历（仅测试数据）" });
+      else if (system.includes("你是简历解析助手")) {
+        if (resumeFailure) {
+          res.writeHead(500);
+          res.end("{}");
+          return;
+        }
+        text = JSON.stringify({
+          text: `解析后的测试简历 ${++resumeCount}：Java 工程师，订单系统。`,
+        });
+      }
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ choices: [{ message: { content: text } }] }));
     });
@@ -82,18 +96,81 @@ async function mainPage(app) {
     page.on("pageerror", (e) => errors.push(e.message));
     await page.screenshot({ path: "test-results/workspace-empty.png" });
     await page.getByRole("button", { name: "应用设置", exact: true }).click();
+    assert.equal(
+      await page.getByLabel("服务商", { exact: true }).inputValue(),
+      "deepseek",
+    );
+    assert.equal(
+      await page.getByLabel("接口协议", { exact: true }).inputValue(),
+      "openai",
+    );
+    assert.equal(
+      await page
+        .getByLabel("模型 ID / 推理接入点", { exact: true })
+        .inputValue(),
+      "deepseek-flash",
+    );
+    assert.equal(
+      await page.getByLabel("API Base URL", { exact: true }).inputValue(),
+      "https://api.deepseek.com",
+    );
     await page.getByLabel("服务商", { exact: true }).selectOption("custom");
-    await page.getByLabel("配置名称", { exact: true }).fill("本地测试模型");
+    assert.equal(
+      await page
+        .getByLabel("模型 ID / 推理接入点", { exact: true })
+        .inputValue(),
+      "",
+    );
+    await page.getByLabel("服务商", { exact: true }).selectOption("deepseek");
+    // Reproduce a failed round before credentials are configured.
+    await page.getByRole("button", { name: "保存连接", exact: true }).click();
     await page
-      .getByLabel("模型 ID / 推理接入点", { exact: true })
-      .fill("fixture-model");
+      .getByRole("button", { name: "编辑 DeepSeek", exact: true })
+      .waitFor();
+    await page.getByRole("button", { name: "智能工作台", exact: true }).click();
     await page
-      .getByLabel("API Base URL", { exact: true })
-      .fill(`http://127.0.0.1:${server.address().port}/v1`);
+      .getByRole("textbox", { name: "输入题目", exact: true })
+      .fill("配置密钥后重试这道题");
+    await page
+      .getByRole("button", { name: "添加题目并生成", exact: true })
+      .click();
+    await page
+      .getByText("上次生成失败：当前模型没有可用密钥，请前往模型设置", {
+        exact: true,
+      })
+      .waitFor();
+    const failedRoundState = await page.evaluate(() => window.api.getState());
+    await page.getByRole("button", { name: "应用设置", exact: true }).click();
+    await page
+      .getByRole("button", { name: "编辑 DeepSeek", exact: true })
+      .click();
     await page
       .getByLabel("API Key", { exact: true })
       .fill("synthetic-test-key");
     await page.getByRole("button", { name: "保存连接", exact: true }).click();
+    await page
+      .getByRole("button", { name: "编辑 DeepSeek", exact: true })
+      .waitFor();
+    const configured = await page.evaluate(() => window.api.getState());
+    assert.equal(configured.models[0].model, "deepseek-flash");
+    assert.equal(configured.models[0].baseUrl, "https://api.deepseek.com");
+    assert.equal(configured.activeModelId, configured.models[0].id);
+    assert.ok(configured.models[0].hasKey);
+    // Save using only a key first; then redirect test traffic to the local fixture.
+    await page
+      .getByRole("button", { name: "编辑 DeepSeek", exact: true })
+      .click();
+    assert.equal(
+      await page.getByLabel("API Key", { exact: true }).inputValue(),
+      "",
+    );
+    await page
+      .getByLabel("API Base URL", { exact: true })
+      .fill(`http://127.0.0.1:${server.address().port}/v1`);
+    await page.getByRole("button", { name: "保存连接", exact: true }).click();
+    await page
+      .getByRole("button", { name: "保存连接", exact: true })
+      .waitFor({ state: "hidden" });
     await page.getByRole("button", { name: "测试", exact: true }).click();
     await page
       .getByText(/连接成功/)
@@ -101,8 +178,150 @@ async function mainPage(app) {
       .waitFor();
     const snapshot = await page.evaluate(() => window.api.getState());
     assert.ok(!JSON.stringify(snapshot).includes("synthetic-test-key"));
+    await page.getByRole("button", { name: "智能工作台", exact: true }).click();
+    const beforeOpen = requests.length;
+    await page.getByRole("button", { name: "打开悬浮窗", exact: true }).click();
+    const retryOverlay = app
+      .windows()
+      .find((p) => p.url().includes("#overlay"));
+    await retryOverlay
+      .getByText("上次生成失败：当前模型没有可用密钥，请前往模型设置", {
+        exact: true,
+      })
+      .waitFor();
+    await retryOverlay
+      .getByText("当前模型已配置密钥，可重新生成本题。", { exact: true })
+      .waitFor();
+    assert.equal(
+      requests.length,
+      beforeOpen,
+      "Opening the overlay must not call the model",
+    );
+    await retryOverlay
+      .getByRole("button", { name: "重新生成", exact: true })
+      .click();
+    await retryOverlay.getByText(answer.approach, { exact: true }).waitFor();
+    assert.equal(await retryOverlay.getByRole("alert").count(), 0);
+    const recoveredRoundState = await page.evaluate(() =>
+      window.api.getState(),
+    );
+    const recoveredRound = recoveredRoundState.sessions[0].rounds[0];
+    assert.equal(recoveredRound.id, failedRoundState.sessions[0].rounds[0].id);
+    assert.equal(recoveredRound.status, "done");
+    assert.equal(recoveredRound.error, undefined);
+    await retryOverlay.getByTitle("隐藏悬浮窗").click();
+    await page.evaluate(
+      (id) => window.api.command({ type: "session:delete", id }),
+      failedRoundState.activeSessionId,
+    );
+    await page.getByRole("button", { name: "应用设置", exact: true }).click();
     await page.screenshot({ path: "test-results/settings.png" });
     await page.getByRole("button", { name: "我的资料库", exact: true }).click();
+    const resumeInput = page.getByRole("textbox", {
+      name: "个人简历",
+      exact: true,
+    });
+    const fileInput = page.getByLabel("上传简历文件", { exact: true });
+    const png = Buffer.from(
+      await page.evaluate(() => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 600;
+        canvas.height = 800;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "white";
+        ctx.fillRect(0, 0, 600, 800);
+        ctx.fillStyle = "black";
+        ctx.font = "24px sans-serif";
+        ctx.fillText("Synthetic Resume - Java Engineer", 30, 60);
+        return canvas.toDataURL("image/png").split(",")[1];
+      }),
+      "base64",
+    );
+    for (const file of [
+      {
+        name: "resume.docx",
+        mimeType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        buffer: docxFixture(),
+      },
+      { name: "resume.pdf", mimeType: "application/pdf", buffer: pdfFixture() },
+      { name: "resume.png", mimeType: "image/png", buffer: png },
+    ]) {
+      const previous = resumeCount;
+      await fileInput.setInputFiles(file);
+      await page.waitForFunction(
+        (n) =>
+          document
+            .querySelector('textarea[aria-label="个人简历"]')
+            .value.includes(`测试简历 ${n}`),
+        previous + 1,
+      );
+      assert.equal(
+        (await page.evaluate(() => window.api.getState())).materials.resume,
+        "",
+        "Parsing must not overwrite saved materials",
+      );
+    }
+    const resumeRequests = requests.filter((r) =>
+      r.messages[0].content.includes("你是简历解析助手"),
+    );
+    assert.match(
+      JSON.parse(resumeRequests[0].messages[1].content).documentText,
+      /延迟降低 20%/,
+    );
+    assert.equal(
+      resumeRequests[1].messages[1].content.filter(
+        (b) => b.type === "image_url",
+      ).length,
+      2,
+    );
+    fs.writeFileSync(
+      "test-results/resume-pdf-page.jpg",
+      Buffer.from(
+        resumeRequests[1].messages[1].content[1].image_url.url.split(",")[1],
+        "base64",
+      ),
+    );
+    const draftResume = await resumeInput.inputValue();
+    await fileInput.setInputFiles({
+      name: "long.pdf",
+      mimeType: "application/pdf",
+      buffer: pdfFixture(11),
+    });
+    await page
+      .getByText("简历 PDF 最多支持 10 页，请精简后上传", { exact: true })
+      .waitFor();
+    assert.equal(await resumeInput.inputValue(), draftResume);
+    resumeFailure = true;
+    await fileInput.setInputFiles({
+      name: "retry.png",
+      mimeType: "image/png",
+      buffer: png,
+    });
+    await page
+      .getByRole("alert")
+      .filter({ hasText: "模型服务暂时不可用" })
+      .first()
+      .waitFor();
+    assert.equal(await resumeInput.inputValue(), draftResume);
+    resumeFailure = false;
+    await fileInput.setInputFiles({
+      name: "retry.png",
+      mimeType: "image/png",
+      buffer: png,
+    });
+    await page.waitForFunction(() =>
+      document
+        .querySelector('textarea[aria-label="个人简历"]')
+        .value.includes("测试简历 4"),
+    );
+    await page.getByRole("button", { name: "保存资料", exact: true }).click();
+    await page.getByRole("button", { name: "已保存", exact: true }).waitFor();
+    assert.match(
+      (await page.evaluate(() => window.api.getState())).materials.resume,
+      /测试简历 4/,
+    );
+    await page.screenshot({ path: "test-results/resume-upload.png" });
     await page
       .getByRole("textbox", { name: "个人简历", exact: true })
       .fill("我完成过一个用于练习的项目。");
@@ -139,7 +358,23 @@ async function mainPage(app) {
       p.url().includes("#overlay"),
     );
     assert.ok(overlay);
-    await overlay.getByText(answer.summary, { exact: true }).waitFor();
+    await overlay.getByText(answer.approach, { exact: true }).waitFor();
+    assert.equal(
+      await overlay.getByText("复述题目", { exact: true }).count(),
+      0,
+    );
+    assert.equal(
+      await overlay.getByText("先问清楚", { exact: true }).count(),
+      0,
+    );
+    await overlay
+      .getByRole("heading", { name: "Java 实现", exact: true })
+      .waitFor();
+    assert.match(
+      await overlay.locator("pre code").innerText(),
+      /class Solution/,
+    );
+    await overlay.screenshot({ path: "test-results/overlay-java.png" });
     await overlay
       .getByLabel("提词窗内容")
       .selectOption({ label: "测试提词稿" });
@@ -147,10 +382,94 @@ async function mainPage(app) {
       .getByText("这是独立悬浮窗的提词稿测试。", { exact: true })
       .waitFor();
     await overlay.screenshot({ path: "test-results/overlay.png" });
+    // Exercise the real registered shortcut callbacks with the native window
+    // unfocused and ignoring mouse input. Test keys avoid the user's bindings.
+    await app.evaluate(({ globalShortcut }) => {
+      const register = globalShortcut.register.bind(globalShortcut);
+      global.__scrollCallbacks = {};
+      globalShortcut.register = (key, callback) => {
+        const registered = register(key, callback);
+        if (registered) global.__scrollCallbacks[key] = callback;
+        return registered;
+      };
+    });
+    const scrollKeys = {
+      scrollUp: "CommandOrControl+Alt+Shift+F9",
+      scrollDown: "CommandOrControl+Alt+Shift+F10",
+      scrollLeft: "CommandOrControl+Alt+Shift+F11",
+      scrollRight: "CommandOrControl+Alt+Shift+F12",
+    };
+    const savedScrollKeys = await page.evaluate(async (keys) => {
+      const state = await window.api.getState();
+      return window.api.command({
+        type: "preferences:save",
+        preferences: {
+          ...state.preferences,
+          shortcuts: { ...state.preferences.shortcuts, ...keys },
+        },
+      });
+    }, scrollKeys);
+    assert.equal(savedScrollKeys.ok, true, savedScrollKeys.error);
+    await overlay.getByLabel("提词窗内容").selectOption("");
+    const nativeOverlay = await app.browserWindow(overlay);
+    await nativeOverlay.evaluate((win) => win.setSize(380, 300));
+    await nativeOverlay.dispose();
     await overlay.getByTitle("切换鼠标穿透").click();
     await page
       .getByRole("button", { name: "关闭鼠标穿透", exact: true })
       .waitFor();
+    await page.bringToFront();
+    const focusedWindow = await app.evaluate(
+      ({ BrowserWindow }) => BrowserWindow.getFocusedWindow()?.id,
+    );
+    assert.equal(
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()
+          .find((w) => w.webContents.getURL().includes("#overlay"))
+          ?.isFocused(),
+      ),
+      false,
+    );
+    const scroll = (key) =>
+      app.evaluate((_electron, accelerator) => {
+        if (!global.__scrollCallbacks[accelerator])
+          throw new Error("Scroll shortcut was not registered");
+        global.__scrollCallbacks[accelerator]();
+      }, scrollKeys[key]);
+    await scroll("scrollDown");
+    await overlay.waitForFunction(
+      () => document.querySelector(".overlay-body").scrollTop > 0,
+    );
+    await scroll("scrollRight");
+    await overlay.waitForFunction(
+      () => document.querySelector("pre").scrollLeft > 0,
+    );
+    await scroll("scrollUp");
+    await overlay.waitForFunction(
+      () => document.querySelector(".overlay-body").scrollTop === 0,
+    );
+    await scroll("scrollLeft");
+    await overlay.waitForFunction(
+      () => document.querySelector("pre").scrollLeft === 0,
+    );
+    assert.equal(
+      (await page.evaluate(() => window.api.getState())).runtime.clickThrough,
+      true,
+    );
+    assert.equal(
+      await app.evaluate(
+        ({ BrowserWindow }) => BrowserWindow.getFocusedWindow()?.id,
+      ),
+      focusedWindow,
+    );
+    await overlay.screenshot({ path: "test-results/overlay-scroll.png" });
+    await page.evaluate(() => window.api.command({ type: "overlay:toggle" }));
+    await scroll("scrollDown");
+    assert.equal(
+      await overlay.locator(".overlay-body").evaluate((el) => el.scrollTop),
+      0,
+    );
+    await page.evaluate(() => window.api.command({ type: "overlay:toggle" }));
     await page
       .getByRole("button", { name: "关闭鼠标穿透", exact: true })
       .click();

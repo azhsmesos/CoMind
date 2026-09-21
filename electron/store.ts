@@ -1,8 +1,11 @@
+import { Transcripts } from "./transcripts";
+import { voiceEndpoint, type VoiceConfig } from "../shared/voice";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   DEFAULT_PREFERENCES,
+  PRESETS,
   type DesktopState,
   type ModelConfig,
   type ModelInput,
@@ -20,6 +23,7 @@ interface SavedModel extends Omit<ModelConfig, "hasKey"> {
 }
 interface SavedData {
   version: 1;
+  voice?: { workspaceId: string; credentialId: string; autoAnswer: boolean };
   models: SavedModel[];
   credentials: Record<string, string>;
   activeModelId: string;
@@ -32,12 +36,14 @@ interface SavedData {
 }
 export class Store {
   data: SavedData;
+  readonly transcripts: Transcripts;
   private memoryKeys = new Map<string, string>();
   warning?: string;
   constructor(
     private file: string,
     private cipher: Cipher,
   ) {
+    this.transcripts = new Transcripts(file + ".transcripts");
     this.data = {
       version: 1,
       models: [],
@@ -95,6 +101,24 @@ export class Store {
             },
           },
         };
+        // Newly introduced defaults must not take an existing custom shortcut.
+        const assigned = new Set(
+          Object.values(saved.preferences.shortcuts || {})
+            .filter((key): key is string => typeof key === "string")
+            .map((key) => key.replace(/\s/g, "").toLowerCase()),
+        );
+        for (const key of [
+          "scrollUp",
+          "scrollDown",
+          "scrollLeft",
+          "scrollRight",
+          "quit",
+        ] as const)
+          if (
+            saved.preferences.shortcuts?.[key] === undefined &&
+            assigned.has(DEFAULT_PREFERENCES.shortcuts[key].toLowerCase())
+          )
+            this.data.preferences.shortcuts[key] = "";
         for (const s of this.data.sessions)
           for (const r of s.rounds)
             if (r.status === "generating") {
@@ -127,6 +151,53 @@ export class Store {
       return "";
     }
   }
+  voiceKey() {
+    const id = this.data.voice?.credentialId;
+    if (!id) return "";
+    if (this.memoryKeys.has(id)) return this.memoryKeys.get(id)!;
+    try {
+      return this.cipher.available() && this.data.credentials[id]
+        ? this.cipher.decrypt(this.data.credentials[id])
+        : "";
+    } catch {
+      return "";
+    }
+  }
+  voiceConfig(): VoiceConfig {
+    return {
+      workspaceId: this.data.voice?.workspaceId || "",
+      autoAnswer: this.data.voice?.autoAnswer ?? true,
+      hasKey: !!this.voiceKey(),
+    };
+  }
+  saveVoice(workspaceId: string, apiKey?: string) {
+    if (
+      typeof workspaceId !== "string" ||
+      (apiKey !== undefined && typeof apiKey !== "string")
+    )
+      throw new Error("语音配置格式无效");
+    workspaceId = workspaceId.trim();
+    voiceEndpoint(workspaceId);
+    const key = apiKey?.trim();
+    if (
+      key &&
+      (/\s|[\u200B-\u200D\uFEFF"'…*]/u.test(key) || key.includes("..."))
+    )
+      throw new Error("请填写完整语音 API Key，不含空白、引号或掩码");
+    const config = {
+      workspaceId,
+      credentialId: this.data.voice?.credentialId || randomUUID(),
+      autoAnswer: this.data.voice?.autoAnswer ?? true,
+    };
+    if (key) {
+      if (this.cipher.available())
+        this.data.credentials[config.credentialId] = this.cipher.encrypt(key);
+      else delete this.data.credentials[config.credentialId];
+      this.memoryKeys.set(config.credentialId, key);
+    }
+    this.data.voice = config;
+    this.save();
+  }
   models(): ModelConfig[] {
     return this.data.models.map(({ credentialId: _, ...m }) => ({
       ...m,
@@ -142,7 +213,7 @@ export class Store {
       provider: input.provider,
       protocol: input.protocol,
       baseUrl: input.baseUrl.trim().replace(/\/+$/, ""),
-      model: input.model.trim(),
+      model: input.model.trim() || PRESETS[input.provider]?.model || "",
       credentialId: old?.credentialId || randomUUID(),
     };
     const url = new URL(model.baseUrl);
@@ -163,6 +234,15 @@ export class Store {
       throw new Error("请完整填写服务名称、协议及模型 ID");
     if (input.apiKey?.trim()) {
       const key = input.apiKey.trim();
+      if (
+        url.hostname === "api.deepseek.com" &&
+        (/^Bearer\s/i.test(key) ||
+          /[\s\u200B-\u200D\uFEFF"'“”‘’…*]/u.test(key) ||
+          key.includes("..."))
+      )
+        throw new Error(
+          "API Key 格式不正确：请粘贴完整密钥，不要包含 Bearer 前缀、引号、空白或掩码字符",
+        );
       if (this.cipher.available())
         this.data.credentials[model.credentialId] = this.cipher.encrypt(key);
       else delete this.data.credentials[model.credentialId];
@@ -186,6 +266,7 @@ export class Store {
   snapshot(runtime: DesktopState["runtime"]): DesktopState {
     const d = this.data;
     return structuredClone({
+      voiceConfig: this.voiceConfig(),
       models: this.models(),
       activeModelId: d.activeModelId,
       materials: d.materials,

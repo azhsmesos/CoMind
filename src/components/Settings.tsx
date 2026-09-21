@@ -1,3 +1,4 @@
+import { VoiceSettings } from "./Voice";
 import { useEffect, useState } from "react";
 import {
   FolderOpen,
@@ -26,6 +27,7 @@ export function Settings({ state, run }: { state: DesktopState; run: Run }) {
   return (
     <>
       <Models state={state} run={run} />
+      <VoiceSettings state={state} run={run} />
       <section className="card settings-section">
         <div className="section-heading">
           <div>

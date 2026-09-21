@@ -38,6 +38,7 @@ async function mainPage(app) {
       "space_complexity",
     ].map((k) => [k, k === "problem" ? "识别到的合成测试题" : "图片测试回答"]),
   );
+  answer.kind = "answer";
   const server = http.createServer((req, res) => {
     let raw = "";
     req.on("data", (b) => (raw += b));
@@ -63,41 +64,29 @@ async function mainPage(app) {
   let app;
   try {
     app = await electron.launch({ args: ["."], env });
-    // Hold renderer painting to reproduce the old blank/blue first-frame flash.
-    await app.context().addInitScript(() => {
-      if (location.hash !== "#capture") return;
-      const raf = window.requestAnimationFrame.bind(window);
-      const pending = [];
-      window.requestAnimationFrame = (callback) => {
-        pending.push(callback);
-        return pending.length;
-      };
-      window.releaseScreenshotPaint = () => {
-        window.requestAnimationFrame = raf;
-        for (const callback of pending.splice(0)) raf(callback);
-      };
-    });
-    async function showPreparedPicker(picker) {
-      await picker.waitForURL(/#capture$/);
-      await picker.locator(".screenshot-frame").waitFor();
-      const nativeWindow = await app.browserWindow(picker);
-      assert.equal(
-        await nativeWindow.evaluate((win) => win.isVisible()),
-        false,
-      );
-      await picker.evaluate(() => window.releaseScreenshotPaint());
-      await expect
-        .poll(() => nativeWindow.evaluate((win) => win.isVisible()))
-        .toBe(true);
-      assert.equal(
-        await picker
-          .locator(".screenshot-frame")
-          .evaluate((img) => img.complete && img.naturalWidth > 0),
-        true,
-      );
-      await nativeWindow.dispose();
-    }
     let page = await mainPage(app);
+    await app.evaluate(({ app, BrowserWindow }) => {
+      global.__captureWindowChanges = [];
+      app.on("browser-window-created", () =>
+        global.__captureWindowChanges.push("new-window"),
+      );
+      for (const win of BrowserWindow.getAllWindows()) {
+        // Observe native window operations instead of macOS occlusion events.
+        for (const method of [
+          "hide",
+          "show",
+          "showInactive",
+          "focus",
+          "setVisibleOnAllWorkspaces",
+        ]) {
+          const original = win[method].bind(win);
+          win[method] = (...args) => {
+            global.__captureWindowChanges.push(`${win.id}:${method}`);
+            return original(...args);
+          };
+        }
+      }
+    });
     // Avoid colliding with a separately running development app.
     await page.evaluate(async () => {
       const state = await window.api.getState();
@@ -142,18 +131,10 @@ async function mainPage(app) {
         ];
       },
     );
-    // Missing model configuration must not prevent local region selection.
-    const firstPicker = app.waitForEvent("window");
-    const missingModelCapture = page.evaluate(() =>
+    // Capture immediately, including when no model is configured; retain for retry.
+    const missingModelResult = await page.evaluate(() =>
       window.api.command({ type: "screenshot:capture" }),
     );
-    const unconfiguredPicker = await firstPicker;
-    await showPreparedPicker(unconfiguredPicker);
-    await unconfiguredPicker.mouse.move(500, 360);
-    await unconfiguredPicker.mouse.down();
-    await unconfiguredPicker.mouse.move(100, 120);
-    await unconfiguredPicker.mouse.up();
-    const missingModelResult = await missingModelCapture;
     assert.equal(missingModelResult.ok, false);
     assert.match(missingModelResult.error, /添加并选择一个模型/);
     const capturedWithoutModel = await page.evaluate(() =>
@@ -167,8 +148,8 @@ async function mainPage(app) {
       path.join(dir, "screenshot.log"),
       "utf8",
     );
-    assert.match(captureLog, /框选窗口已显示/);
-    assert.match(captureLog, /已选择截图区域/);
+    assert.match(captureLog, /整屏截图完成/);
+    assert.ok(!captureLog.includes("框选窗口"));
     assert.match(captureLog, /ERROR.*添加并选择一个模型/);
     assert.ok(!captureLog.includes("data:image"));
     await page.evaluate(
@@ -181,10 +162,10 @@ async function mainPage(app) {
         config: {
           id: "vision-fixture",
           name: "图片测试",
-          provider: "custom",
+          provider: "deepseek",
           protocol: "openai",
           baseUrl,
-          model: "vision-fixture",
+          model: "deepseek-flash",
           apiKey: "synthetic-key",
         },
       });
@@ -192,7 +173,7 @@ async function mainPage(app) {
     }, "http://127.0.0.1:" + server.address().port);
     await page.getByRole("button", { name: "快捷键", exact: true }).click();
     await page.getByText("截图日志（最近 20 条）", { exact: true }).waitFor();
-    const shortcutInput = page.getByLabel("框选截图并自动解答", {
+    const shortcutInput = page.getByLabel("整屏截图并自动解答", {
       exact: true,
     });
     const waitForRecording = () =>
@@ -281,46 +262,39 @@ async function mainPage(app) {
         app.evaluate(({ globalShortcut }) => globalShortcut.isRegistered("F8")),
       )
       .toBe(true);
-    const untrusted = await page.evaluate(async () => {
-      try {
-        await window.api.screenshot.frame();
-        return false;
-      } catch {
-        return true;
-      }
+    assert.equal(await page.evaluate(() => window.api.screenshot), undefined);
+    // Keep the answer overlay visible and in passthrough mode throughout capture.
+    await page.evaluate(async () => {
+      const state = await window.api.getState();
+      if (!state.runtime.overlayVisible)
+        await window.api.command({ type: "overlay:toggle" });
+      if (!state.runtime.clickThrough)
+        await window.api.command({ type: "overlay:penetration" });
     });
-    assert.equal(untrusted, true);
-    assert.equal(
-      await page.evaluate(async () => {
-        try {
-          await window.api.screenshot.ready(true);
-          return false;
-        } catch {
-          return true;
-        }
-      }),
-      true,
+    const originalWindows = await app.evaluate(({ BrowserWindow }) => {
+      global.__captureWindowChanges = [];
+      return BrowserWindow.getAllWindows().map((w) => ({
+        id: w.id,
+        bounds: w.getBounds(),
+      }));
+    });
+    // Both button and registered global shortcut submit without selection or confirmation.
+    await page
+      .getByRole("button", { name: "截图并自动解答", exact: true })
+      .click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          async () =>
+            (await window.api.getState()).sessions[0]?.rounds[0]?.status,
+        ),
+      )
+      .toBe("done");
+    assert.equal(requests.length, 1);
+    const focusedBeforeShortcut = await app.evaluate(
+      ({ BrowserWindow }) => BrowserWindow.getFocusedWindow()?.id,
     );
-    async function startCapture(viaShortcut = false) {
-      const pending = app.waitForEvent("window");
-      if (viaShortcut) await app.evaluate(() => global.__screenshotShortcut());
-      else
-        await page
-          .getByRole("button", { name: "框选截图并解答", exact: true })
-          .click();
-      const picker = await pending;
-      await showPreparedPicker(picker);
-      await picker
-        .getByText("拖动框选 · 松开自动上传 · Esc 取消", { exact: true })
-        .waitFor();
-      return picker;
-    }
-    let picker = await startCapture();
-    await picker.mouse.click(100, 100);
-    await picker.getByText("请拖动框选更大的区域").waitFor();
-    await picker.keyboard.press("Escape").catch((error) => {
-      if (!picker.isClosed()) throw error;
-    });
+    await app.evaluate(() => global.__screenshotShortcut());
     await expect
       .poll(() =>
         page.evaluate(
@@ -328,45 +302,31 @@ async function mainPage(app) {
         ),
       )
       .toBeUndefined();
-    assert.equal(requests.length, 0);
+    assert.equal(requests.length, 2);
     assert.equal(
-      await app.evaluate(({ BrowserWindow }) =>
-        BrowserWindow.getAllWindows()
-          .find((w) => !w.webContents.getURL().includes("#"))
-          ?.isVisible(),
+      await app.evaluate(
+        ({ BrowserWindow }) => BrowserWindow.getFocusedWindow()?.id,
       ),
-      true,
+      focusedBeforeShortcut,
     );
-    picker = await startCapture(true);
-    assert.ok(
-      (await page.evaluate(() => window.api.getState())).runtime
-        .lastScreenshotShortcut,
+    assert.deepEqual(
+      await app.evaluate(() => global.__captureWindowChanges),
+      [],
     );
-    const viewport = await picker.evaluate(() => ({
-      width: innerWidth,
-      height: innerHeight,
-    }));
-    await picker.mouse.move(100, 120);
-    await picker.mouse.down();
-    await picker.mouse.move(500, 360);
-    assert.equal(
-      await picker
-        .locator(".screenshot-selection")
-        .evaluate((el) => getComputedStyle(el).boxShadow),
-      "none",
+    assert.deepEqual(
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows().map((w) => ({
+          id: w.id,
+          bounds: w.getBounds(),
+        })),
+      ),
+      originalWindows,
     );
-    await picker.mouse.up();
-    await expect
-      .poll(
-        () =>
-          page.evaluate(
-            async () =>
-              (await window.api.getState()).sessions[0]?.rounds[0]?.status,
-          ),
-        { timeout: 15000 },
-      )
-      .toBe("done");
-    assert.equal(requests.length, 1);
+    const runtime = (await page.evaluate(() => window.api.getState())).runtime;
+    assert.equal(runtime.overlayVisible, true);
+    assert.equal(runtime.clickThrough, true);
+    assert.ok(runtime.lastScreenshotShortcut);
+    assert.equal(requests[0].model, "deepseek-flash");
     const image = requests[0].messages[1].content.find(
       (c) => c.type === "image_url",
     ).image_url.url;
@@ -376,14 +336,19 @@ async function mainPage(app) {
         nativeImage.createFromDataURL(image).getSize(),
       image,
     );
-    assert.equal(imageSize.width, Math.round((400 / viewport.width) * 1000));
-    assert.equal(imageSize.height, Math.round((240 / viewport.height) * 600));
+    assert.deepEqual(imageSize, { width: 1000, height: 600 });
     const state = await page.evaluate(() => window.api.getState());
     assert.equal(state.sessions[0].rounds[0].question, answer.problem);
     assert.equal(state.sessions[0].rounds[0].image, image);
     assert.equal(state.runtime.overlayVisible, true);
     const overlay = app.windows().find((p) => p.url().endsWith("#overlay"));
     await overlay.getByText("图片测试回答", { exact: true }).first().waitFor();
+    assert.equal(await overlay.locator("pre").count(), 0);
+    assert.equal(
+      await overlay.getByText("复述题目", { exact: true }).count(),
+      0,
+    );
+    assert.equal(await overlay.locator(".overlay-question").count(), 0);
     assert.equal(await overlay.getByRole("slider").count(), 0);
     // No capture when paused.
     await page.evaluate(
@@ -391,13 +356,13 @@ async function mainPage(app) {
       state.activeSessionId,
     );
     await page
-      .getByRole("button", { name: "框选截图并解答", exact: true })
+      .getByRole("button", { name: "截图并自动解答", exact: true })
       .click();
     await page
       .getByRole("alert")
       .filter({ hasText: "请先继续会话再截图" })
       .waitFor();
-    assert.equal(requests.length, 1);
+    assert.equal(requests.length, 2);
     if (process.platform === "darwin") {
       await page.evaluate(
         async (id) => window.api.command({ type: "session:resume", id }),
@@ -407,10 +372,10 @@ async function mainPage(app) {
         global.__screenDenied = true;
       });
       await page
-        .getByRole("button", { name: "框选截图并解答", exact: true })
+        .getByRole("button", { name: "截图并自动解答", exact: true })
         .click();
       await page.getByRole("alert").filter({ hasText: "屏幕录制" }).waitFor();
-      assert.equal(requests.length, 1);
+      assert.equal(requests.length, 2);
     }
     await app.close();
     app = null;
@@ -420,7 +385,7 @@ async function mainPage(app) {
     assert.equal(restored.preferences.shortcuts.screenshot, "F8");
     assert.equal(restored.sessions[0].rounds[0].image, image);
     console.log(
-      "PASS: selection without model and saved image, visible/persisted diagnostics, native selector, tiny-region handling, Esc cancellation, cropped-only upload, AI answer, IPC restrictions, paused/permission errors and restart persistence. Synthetic screen and local model server.",
+      "PASS: automatic full-screen button/shortcut submission, no window creation/hide/show/focus or bounds changes, passthrough preserved, full image upload, saved image without model, diagnostics, paused/permission errors and restart persistence. Synthetic screen and local model server.",
     );
   } finally {
     if (app) await app.close();

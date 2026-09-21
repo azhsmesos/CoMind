@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { VoiceStatus } from "./components/Voice";
+import { useEffect, useRef, useState } from "react";
 import {
   LayoutDashboard,
   BookOpen,
@@ -13,7 +14,12 @@ import {
   ArrowUpRight,
   Keyboard,
 } from "lucide-react";
-import type { Command, CommandResult, DesktopState } from "./types";
+import type {
+  Command,
+  CommandResult,
+  DesktopState,
+  OverlayScrollDirection,
+} from "./types";
 import { Workspace } from "./components/Workspace";
 import { Materials } from "./components/Materials";
 import { History } from "./components/History";
@@ -50,7 +56,7 @@ const navigation = [
     id: "shortcuts",
     label: "快捷键",
     icon: Keyboard,
-    subtitle: "框选题目，一键发送给 AI",
+    subtitle: "截取当前屏幕，自动发送给 AI",
   },
 ] as const;
 type Tab = (typeof navigation)[number]["id"];
@@ -58,11 +64,69 @@ function Overlay({ state, run }: { state: DesktopState; run: Run }) {
   const active =
     state.sessions.find((s) => s.id === state.activeSessionId) ||
     state.sessions[0];
-  const round = active?.rounds.at(-1);
+  const latestRound = active?.rounds.at(-1);
+  const round =
+    latestRound?.source === "voice" && latestRound.status === "generating"
+      ? [...(active?.rounds || [])]
+          .reverse()
+          .find((r) => r.answer && r.status === "done") || latestRound
+      : latestRound;
+  const model = state.models.find((m) => m.id === state.activeModelId);
   const [scriptId, setScriptId] = useState("");
+  const [retryError, setRetryError] = useState("");
+  const bodyRef = useRef<HTMLElement>(null);
+  useEffect(
+    () =>
+      window.api.onOverlayScroll((direction: OverlayScrollDirection) => {
+        const body = bodyRef.current;
+        if (!body) return;
+        if (direction === "up" || direction === "down")
+          body.scrollBy({
+            top:
+              (direction === "down" ? 1 : -1) *
+              Math.max(80, body.clientHeight * 0.75),
+            behavior: "instant",
+          });
+        else if (direction === "left" || direction === "right")
+          body.querySelectorAll("pre").forEach((code) => {
+            code.scrollBy({
+              left:
+                (direction === "right" ? 1 : -1) *
+                Math.max(80, code.clientWidth * 0.75),
+              behavior: "instant",
+            });
+          });
+      }),
+    [],
+  );
+  useEffect(() => {
+    bodyRef.current?.scrollTo({ top: 0, behavior: "instant" });
+    bodyRef.current
+      ?.querySelectorAll("pre")
+      .forEach((code) => code.scrollTo({ left: 0, behavior: "instant" }));
+  }, [round?.id, round?.answer?.code, round?.answer?.summary, scriptId]);
+  const scrollKey = (
+    key: "scrollUp" | "scrollDown" | "scrollLeft" | "scrollRight",
+  ) => {
+    const shortcut = state.runtime.registeredShortcuts[key];
+    if (!shortcut) return "未启用";
+    return shortcut
+      .replace(
+        /CommandOrControl/g,
+        window.api.platform === "darwin" ? "⌘" : "Ctrl",
+      )
+      .replace(/Alt/g, window.api.platform === "darwin" ? "⌥" : "Alt")
+      .replace(/\bUp\b/g, "↑")
+      .replace(/\bDown\b/g, "↓")
+      .replace(/\bLeft\b/g, "←")
+      .replace(/\bRight\b/g, "→");
+  };
   useEffect(() => {
     setScriptId("");
   }, [round?.id]);
+  useEffect(() => {
+    setRetryError("");
+  }, [round?.id, round?.status]);
   const script = state.materials.scripts.find((s) => s.id === scriptId);
   return (
     <div
@@ -107,11 +171,24 @@ function Overlay({ state, run }: { state: DesktopState; run: Run }) {
         </select>
         <span>
           {state.runtime.clickThrough
-            ? "穿透已开启 · 快捷键或主窗口恢复"
+            ? "穿透已开启 · 使用下方快捷键滚动"
             : "拖动顶部移动窗口"}
         </span>
+        <div className="overlay-scroll-hint">
+          <span>
+            上翻 {scrollKey("scrollUp")} · 下翻 {scrollKey("scrollDown")}
+          </span>
+          <span>
+            代码左移 {scrollKey("scrollLeft")} · 右移 {scrollKey("scrollRight")}
+          </span>
+          {(!state.runtime.registeredShortcuts.scrollUp ||
+            !state.runtime.registeredShortcuts.scrollDown) && (
+            <span>可在主窗口「快捷键」中启用或更换</span>
+          )}
+        </div>
       </div>
-      <main className="overlay-body">
+      <VoiceStatus voice={state.runtime.voice} run={run} />
+      <main className="overlay-body" ref={bodyRef}>
         {script ? (
           <>
             <h2>{script.title}</h2>
@@ -119,11 +196,38 @@ function Overlay({ state, run }: { state: DesktopState; run: Run }) {
           </>
         ) : (
           <>
-            {round && <p className="overlay-question">{round.question}</p>}
-            {round?.status === "generating" && <p role="status">正在生成…</p>}
-            {round?.error && <p className="error-box">{round.error}</p>}
+            {latestRound?.status === "generating" && (
+              <p role="status">正在生成…</p>
+            )}
+            {round?.error && (
+              <div className="error-box" role="alert">
+                <p>上次生成失败：{round.error}</p>
+                <p>
+                  {model?.hasKey
+                    ? "当前模型已配置密钥，可重新生成本题。"
+                    : "请先在主窗口配置并启用有可用密钥的模型。"}
+                </p>
+                {active?.status === "ongoing" && (
+                  <button
+                    disabled={round.status === "generating"}
+                    onClick={async () => {
+                      setRetryError("");
+                      const result = await run({
+                        type: "round:generate",
+                        sessionId: active.id,
+                        roundId: round.id,
+                      });
+                      if (!result.ok) setRetryError(result.error || "重试失败");
+                    }}
+                  >
+                    重新生成
+                  </button>
+                )}
+              </div>
+            )}
+            {retryError && <p role="alert">本次重试失败：{retryError}</p>}
             {round?.answer ? (
-              <Answer answer={round.answer} />
+              <Answer answer={round.answer} compact />
             ) : (
               <div className="empty">
                 <Sparkles size={32} />
@@ -169,12 +273,21 @@ export default function App() {
   const run: Run = async (command: Command): Promise<CommandResult> => {
     try {
       const result = await window.api.command(command);
-      if (!result.ok || result.text)
+      if (
+        !result.ok ||
+        (result.text && command.type !== "materials:import-resume")
+      )
         setFeedback({
           text: result.error || result.text || "",
           error: !result.ok,
         });
-      else if (command.type === "preferences:save") setFeedback(null);
+      else if (
+        command.type === "preferences:save" ||
+        command.type === "model:save" ||
+        command.type === "model:select" ||
+        command.type === "materials:import-resume"
+      )
+        setFeedback(null);
       return result;
     } catch {
       const error = "桌面服务请求失败，请重试";

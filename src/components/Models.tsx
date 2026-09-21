@@ -12,11 +12,11 @@ import {
 export type Run = (command: Command) => Promise<CommandResult>;
 const blank = (): ModelInput => ({
   id: "",
-  name: "豆包",
-  provider: "doubao",
+  name: PRESETS.deepseek.name,
+  provider: "deepseek",
   protocol: "openai",
-  baseUrl: PRESETS.doubao.baseUrl,
-  model: "",
+  baseUrl: PRESETS.deepseek.baseUrl,
+  model: PRESETS.deepseek.model,
   apiKey: "",
 });
 export function Models({ state, run }: { state: DesktopState; run: Run }) {
@@ -136,7 +136,7 @@ export function Models({ state, run }: { state: DesktopState; run: Run }) {
                     name: PRESETS[provider].name,
                     baseUrl: PRESETS[provider].baseUrl,
                     protocol: "openai",
-                    model: "",
+                    model: PRESETS[provider].model,
                   });
                 }}
               >
@@ -183,6 +183,13 @@ export function Models({ state, run }: { state: DesktopState; run: Run }) {
                 value={draft.model}
                 onChange={(e) => update({ model: e.target.value })}
               />
+              {draft.provider === "deepseek" && (
+                <small>
+                  推荐
+                  deepseek-flash，支持文本理解和截图识别。已预填模型与接口地址，只需填写
+                  API Key。
+                </small>
+              )}
             </label>
             <label className="full">
               API Base URL
@@ -208,6 +215,12 @@ export function Models({ state, run }: { state: DesktopState; run: Run }) {
                 value={draft.apiKey}
                 onChange={(e) => update({ apiKey: e.target.value })}
               />
+              {draft.provider === "deepseek" && (
+                <small>
+                  使用 DeepSeek 开放平台创建的完整 API
+                  Key，粘贴后点击「保存连接」。
+                </small>
+              )}
               <small>
                 {state.runtime.encryptedStorage
                   ? "密钥使用操作系统加密保存，不会传回界面。"

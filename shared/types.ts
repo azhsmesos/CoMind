@@ -1,3 +1,12 @@
+import type { MobileRuntime, MobileCommand } from "./mobile";
+export * from "./mobile";
+import type {
+  VoiceConfig,
+  VoiceRuntime,
+  VoiceCommand,
+  TranscriptPage,
+} from "./voice";
+export * from "./voice";
 export type Provider = "doubao" | "deepseek" | "glm" | "custom";
 export type Protocol = "openai" | "anthropic";
 export interface ModelConfig {
@@ -10,16 +19,29 @@ export interface ModelConfig {
   hasKey: boolean;
 }
 export type ModelInput = Omit<ModelConfig, "hasKey"> & { apiKey?: string };
-export const PRESETS: Record<Provider, { name: string; baseUrl: string }> = {
+export const PRESETS: Record<
+  Provider,
+  { name: string; baseUrl: string; model: string }
+> = {
   doubao: {
     name: "豆包 · 火山方舟",
     baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    model: "",
   },
-  deepseek: { name: "DeepSeek", baseUrl: "https://api.deepseek.com" },
-  glm: { name: "GLM · 智谱", baseUrl: "https://open.bigmodel.cn/api/paas/v4" },
-  custom: { name: "自定义服务", baseUrl: "" },
+  deepseek: {
+    name: "DeepSeek",
+    baseUrl: "https://api.deepseek.com",
+    model: "deepseek-flash",
+  },
+  glm: {
+    name: "GLM · 智谱",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    model: "",
+  },
+  custom: { name: "自定义服务", baseUrl: "", model: "" },
 };
 export interface InterviewScript {
+  kind?: "answer" | "algorithm";
   summary: string;
   problem: string;
   clarify: string;
@@ -40,6 +62,11 @@ export interface Materials {
   answers: MaterialItem[];
   scripts: MaterialItem[];
 }
+export const MAX_RESUME_FILE_BYTES = 20 * 1024 * 1024;
+export const MAX_RESUME_PAGES = 10;
+export const MAX_RESUME_IMAGE_CHARS = 20 * 1024 * 1024;
+export type ResumeUpload =
+  { kind: "word"; data: Uint8Array } | { kind: "images"; images: string[] };
 export interface PageContext {
   title: string;
   url: string;
@@ -48,7 +75,7 @@ export interface PageContext {
 export interface Round {
   id: string;
   question: string;
-  source: "manual" | "browser" | "screenshot";
+  source: "manual" | "browser" | "screenshot" | "voice";
   image?: string;
   url?: string;
   userSpeech: string;
@@ -70,6 +97,7 @@ export interface Evaluation {
   }[];
 }
 export interface Session {
+  transcriptRevision?: number;
   id: string;
   name: string;
   createdAt: string;
@@ -88,8 +116,13 @@ export interface Preferences {
     generate: string;
     overlay: string;
     penetration: string;
+    scrollUp: string;
+    scrollDown: string;
+    scrollLeft: string;
+    scrollRight: string;
     pair: string;
     screenshot: string;
+    quit: string;
   };
 }
 export const DEFAULT_PREFERENCES: Preferences = {
@@ -102,11 +135,17 @@ export const DEFAULT_PREFERENCES: Preferences = {
     generate: "CommandOrControl+Shift+Return",
     overlay: "CommandOrControl+Shift+B",
     penetration: "CommandOrControl+Shift+M",
+    scrollUp: "CommandOrControl+Alt+Up",
+    scrollDown: "CommandOrControl+Alt+Down",
+    scrollLeft: "CommandOrControl+Alt+Left",
+    scrollRight: "CommandOrControl+Alt+Right",
     pair: "CommandOrControl+Shift+P",
     screenshot: "CommandOrControl+Shift+S",
+    quit: "Control+C",
   },
 };
 export interface DesktopState {
+  voiceConfig: VoiceConfig;
   models: ModelConfig[];
   activeModelId: string;
   materials: Materials;
@@ -114,6 +153,8 @@ export interface DesktopState {
   activeSessionId: string | null;
   preferences: Preferences;
   runtime: {
+    mobile: MobileRuntime;
+    voice: VoiceRuntime;
     port: number;
     paired: boolean;
     lastCapture?: string;
@@ -133,10 +174,13 @@ export interface DesktopState {
   };
 }
 export type Command =
+  | MobileCommand
+  | VoiceCommand
   | { type: "clipboard:write"; text: string }
   | { type: "model:save"; config: ModelInput }
   | { type: "model:select" | "model:delete" | "model:test"; id: string }
   | { type: "materials:save"; materials: Materials }
+  | { type: "materials:import-resume"; upload: ResumeUpload }
   | { type: "materials:optimize"; field: "resume" | "jd"; text: string }
   | { type: "session:create"; name?: string }
   | {
@@ -173,21 +217,13 @@ export interface CommandResult {
   text?: string;
 }
 export interface DesktopApi {
-  screenshot: {
-    frame(): Promise<string>;
-    ready(loaded: boolean): Promise<void>;
-    select(rect: CaptureRect): Promise<CommandResult>;
-    cancel(): Promise<void>;
-  };
+  transcripts(sessionId: string, before?: number): Promise<TranscriptPage>;
+  onOverlayScroll(
+    callback: (direction: OverlayScrollDirection) => void,
+  ): () => void;
   platform: string;
   getState(): Promise<DesktopState>;
   command(command: Command): Promise<CommandResult>;
   onState(callback: (state: DesktopState) => void): () => void;
 }
-// Coordinates are fractions of the captured display, independent of Retina scale.
-export interface CaptureRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+export type OverlayScrollDirection = "up" | "down" | "left" | "right";

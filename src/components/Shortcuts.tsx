@@ -4,10 +4,15 @@ import type { DesktopState, Preferences } from "../types";
 import type { Run } from "./Models";
 
 const actions = [
-  ["screenshot", "框选截图并自动解答"],
+  ["screenshot", "整屏截图并自动解答"],
+  ["quit", "退出整个应用"],
   ["generate", "生成当前题目"],
   ["overlay", "显示 / 隐藏悬浮窗"],
   ["penetration", "切换鼠标穿透"],
+  ["scrollUp", "悬浮窗向上翻页（穿透时可用）"],
+  ["scrollDown", "悬浮窗向下翻页（穿透时可用）"],
+  ["scrollLeft", "悬浮窗代码向左滚动（穿透时可用）"],
+  ["scrollRight", "悬浮窗代码向右滚动（穿透时可用）"],
   ["pair", "开放扩展配对"],
 ] as const;
 
@@ -57,11 +62,11 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
   const [saved, setSaved] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recordHint, setRecordHint] = useState("");
-  const screenshotInput = useRef<HTMLInputElement>(null);
+  const recordingInput = useRef<HTMLInputElement | null>(null);
   const recordingReady = useRef(false);
   const beforeRecording = useRef("");
   useEffect(() => {
-    const blur = () => screenshotInput.current?.blur();
+    const blur = () => recordingInput.current?.blur();
     window.addEventListener("blur", blur);
     return () => {
       window.removeEventListener("blur", blur);
@@ -136,7 +141,10 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
           <summary>截图日志（最近 20 条）</summary>
           <ol>
             {state.runtime.screenshotLog.map((entry, index) => (
-              <li key={index} className={entry.error ? "error-text" : undefined}>
+              <li
+                key={index}
+                className={entry.error ? "error-text" : undefined}
+              >
                 {new Date(entry.at).toLocaleTimeString()} · {entry.message}
               </li>
             ))}
@@ -151,24 +159,31 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
           <label key={key}>
             {label}
             <input
-              ref={key === "screenshot" ? screenshotInput : undefined}
-              readOnly={key === "screenshot"}
-              value={key === "screenshot" ? displayKey(draft[key]) : draft[key]}
+              readOnly={key === "screenshot" || key === "quit"}
+              value={
+                key === "screenshot" || key === "quit"
+                  ? displayKey(draft[key])
+                  : draft[key]
+              }
               maxLength={100}
               placeholder={
-                key === "screenshot"
+                key === "screenshot" || key === "quit"
                   ? recording
                     ? "请按下组合键…"
                     : "点击后按下组合键"
                   : "留空停用"
               }
               aria-describedby={
-                key === "screenshot" ? "screenshot-key-hint" : undefined
+                key === "screenshot" || key === "quit"
+                  ? "shortcut-key-hint"
+                  : undefined
               }
               onFocus={
-                key === "screenshot"
-                  ? async () => {
-                      beforeRecording.current = draft.screenshot;
+                key === "screenshot" || key === "quit"
+                  ? async (event) => {
+                      const input = event.currentTarget;
+                      recordingInput.current = input;
+                      beforeRecording.current = draft[key];
                       recordingReady.current = false;
                       setRecording(true);
                       setRecordHint("正在准备录入…");
@@ -176,7 +191,7 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
                         type: "shortcuts:record",
                         recording: true,
                       });
-                      if (document.activeElement === screenshotInput.current) {
+                      if (document.activeElement === input) {
                         recordingReady.current = result.ok;
                         setRecordHint(
                           result.ok
@@ -188,7 +203,7 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
                   : undefined
               }
               onBlur={
-                key === "screenshot"
+                key === "screenshot" || key === "quit"
                   ? () => {
                       recordingReady.current = false;
                       setRecording(false);
@@ -198,7 +213,7 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
                   : undefined
               }
               onKeyDown={
-                key === "screenshot"
+                key === "screenshot" || key === "quit"
                   ? (e) => {
                       if (
                         e.key === "Tab" &&
@@ -220,7 +235,7 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
                       if (e.key === "Escape" && !modified) {
                         setDraft((d) => ({
                           ...d,
-                          screenshot: beforeRecording.current,
+                          [key]: beforeRecording.current,
                         }));
                         e.currentTarget.blur();
                         return;
@@ -234,11 +249,11 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
                         );
                         return;
                       }
-                      setDraft((d) => ({ ...d, screenshot: shortcut }));
+                      setDraft((d) => ({ ...d, [key]: shortcut }));
                       setSaved(false);
                       setRecordHint(
                         clear
-                          ? "已清空，保存后停用截图快捷键。"
+                          ? "已清空，保存后停用此快捷键。"
                           : "已识别 " +
                               displayKey(shortcut) +
                               "，点击“保存快捷键”生效。",
@@ -254,9 +269,18 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
           </label>
         ))}
       </div>
-      <p className="muted" id="screenshot-key-hint" role="status">
+      <p className="muted" id="shortcut-key-hint" role="status">
         {recordHint ||
-          "截图快捷键：点击输入框后直接按键，支持组合键；Esc 取消，Backspace / Delete 清空。"}
+          "截图和退出快捷键：点击输入框后直接按键，支持组合键；Esc 取消，Backspace / Delete 清空。"}
+      </p>
+      <p className="muted">
+        默认 Control+C 退出整个
+        CoMind，包括主窗口、悬浮窗、托盘、会议识别及手机共享。 macOS 使用
+        Control 键，不是
+        ⌘。点击“退出整个应用”的输入框可录入其他组合键，清空并保存可停用。
+      </p>
+      <p className="muted">
+        穿透后滚轮操作下方窗口。用悬浮窗翻页快捷键阅读长答案，左右滚动快捷键查看超宽代码；不会切换窗口焦点。快捷键可在上方修改，留空停用。
       </p>
       <p className="muted">
         默认使用{" "}
@@ -270,17 +294,15 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
         </p>
       ))}
       <div className="screenshot-guide">
-        <h3>框选截图 → 自动上传 → AI 解答</h3>
+        <h3>截取当前屏幕 → 自动上传 → AI 解答</h3>
         <p>
-          在鼠标所在的屏幕拖动框选，松开鼠标后将所选区域发送给当前启用的模型。Esc
-          或右键取消。截图会随会话保存在本机，失败时可在工作台重试。
+          点击按钮或按快捷键，直接截取鼠标所在的整个屏幕并发送给当前模型，无需圈选或确认。
+          截图过程中保持悬浮窗原位，不切换窗口；屏幕上可见的内容都会随截图提交。
         </p>
         <p>
-          按快捷键后拖动框选，松开鼠标即自动上传，无需额外确认。Esc 或右键取消。
-        </p>
-        <p>
-          可以先框选截图；未配置模型时，截图会保存到会话，配置支持图片输入的模型后可重试识别。macOS
-          首次使用需允许屏幕录制权限；会话暂停时请先继续会话。
+          建议先打开题目页面，再按截图快捷键。多屏使用时先把鼠标移到目标屏幕；悬浮窗若遮住题目，请先移开。
+          截图会随会话保存在本机，失败时可在工作台重试。macOS
+          首次使用需允许屏幕录制权限。
         </p>
         <button
           className="primary"
@@ -288,7 +310,7 @@ export function Shortcuts({ state, run }: { state: DesktopState; run: Run }) {
           onClick={() => void run({ type: "screenshot:capture" })}
         >
           <Camera size={16} />
-          {capturing ? state.runtime.jobs.screenshot : "框选截图并解答"}
+          {capturing ? state.runtime.jobs.screenshot : "截图并自动解答"}
         </button>
       </div>
     </section>
