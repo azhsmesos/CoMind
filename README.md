@@ -73,7 +73,9 @@ DeepSeek 使用 **OpenAI Chat Completions** 协议，按[官方图像理解文�
 
 ### 会议语音识别（Mac）
 
-在 **应用设置 → 会议语音识别** 填写阿里云百炼北京地域的 **Workspace ID** 和独立的 **语音 API Key**，保存后测试连接。使用 `qwen3-asr-flash-realtime`，连接地址根据 Workspace ID 自动生成；DeepSeek 的 Key 不能代替百炼 Key。官方参考：[百炼实时语音识别](https://help.aliyun.com/en/model-studio/real-time-speech-recognition-user-guide)。
+在 **应用设置 → 会议语音识别** 选择语音识别模型，填写阿里云百炼北京地域的 **Workspace ID** 和独立的 **语音 API Key**，保存后测试连接。支持 `qwen3-asr-flash-realtime`（默认）、`fun-asr-realtime`、`paraformer-realtime-v2`。旧配置继续使用千问；切换时 API Key 留空可保留已有密钥，需确保账号已开通所选模型。DeepSeek 的 Key 不能代替百炼 Key。官方参考：[百炼实时语音识别](https://help.aliyun.com/en/model-studio/real-time-speech-recognition-user-guide)。
+
+会议系统声音转写与模拟面试麦克风共用所选模型。保存语音配置会停止当前识别和未完成的语音自动任务，再次开始后使用新模型；选择会在重启后保留。千问使用 Realtime 协议，Fun-ASR 与 Paraformer 使用 Inference 协议，应用自动适配连接地址、音频发送和转写结果。豆包及本地 Whisper 暂未接入此选择列表。
 
 在工作台点击 **开始会议识别**，即可实时转写电脑播放的系统声音，适合戴耳机开会。只采集系统声音，不启用麦克风，也不区分会议软件或远端说话人；其他应用播放的语音同样会被识别。系统音频上传百炼，转写文字由当前启用的回答模型判断问题，两个服务分别计费。原始音频只在内存中处理，不写入文件。
 

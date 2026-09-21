@@ -28,15 +28,26 @@ async function mainPage(app) {
   const modelRequests = [];
   const sockets = new Set();
   let pcm = 0;
+  let failNextTest = false;
+  const selectedModels = [];
   const asr = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await once(asr, "listening");
   asr.on("connection", (ws) => {
     sockets.add(ws);
     ws.on("close", () => sockets.delete(ws));
-    ws.on("message", (raw) => {
+    ws.on("message", (raw, binary) => {
+      if (binary) { pcm++; return; }
       const msg = JSON.parse(raw);
-      if (msg.type === "session.update")
-        ws.send(JSON.stringify({ type: "session.updated" }));
+      if (msg.header?.action === "run-task") {
+        selectedModels.push(msg.payload.model);
+        ws.send(JSON.stringify({ header: { event: "task-started", task_id: msg.header.task_id } }));
+      }
+      if (msg.type === "session.update") {
+        ws.send(JSON.stringify(failNextTest
+          ? { type: "error", error: { code: "invalid_api_key" } }
+          : { type: "session.updated" }));
+        failNextTest = false;
+      }
       if (msg.type === "input_audio_buffer.append") pcm++;
       if (msg.type === "session.finish")
         ws.send(JSON.stringify({ type: "session.finished" }));
@@ -170,6 +181,24 @@ async function mainPage(app) {
       .getByRole("button", { name: "测试语音连接", exact: true })
       .click();
     await page.getByText("百炼语音连接成功", { exact: true }).waitFor();
+    const success = page.getByRole("status", { name: "语音连接测试结果" });
+    await expect(success).toContainText("连接测试成功：qwen3-asr-flash-realtime");
+    await expect(success).toBeInViewport();
+    failNextTest = true;
+    await page.getByRole("button", { name: "测试语音连接", exact: true }).click();
+    await expect(page.getByRole("alert", { name: "语音连接测试结果" })).toContainText("连接测试失败：百炼语音鉴权失败");
+    await expect(success).toHaveCount(0);
+    for (const model of ["fun-asr-realtime", "paraformer-realtime-v2", "qwen3-asr-flash-realtime"]) {
+      await page.getByLabel("语音识别模型", { exact: true }).selectOption(model);
+      await expect(page.getByLabel("语音连接测试结果", { exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "测试语音连接", exact: true })).toBeDisabled();
+      await page.getByRole("button", { name: "保存语音连接", exact: true }).click();
+      await expect.poll(() => page.evaluate(async () => (await window.api.getState()).voiceConfig.model)).toBe(model);
+      await page.getByRole("button", { name: "测试语音连接", exact: true }).click();
+      await expect(page.getByRole("button", { name: "测试语音连接", exact: true })).toBeEnabled();
+      await expect(success).toContainText(`连接测试成功：${model}`);
+    }
+    assert.deepEqual(selectedModels, ["fun-asr-realtime", "paraformer-realtime-v2"]);
     await page.getByRole("button", { name: "智能工作台", exact: true }).click();
     await page.evaluate(async () => {
       await window.api.command({ type: "overlay:toggle" });
@@ -291,6 +320,11 @@ async function mainPage(app) {
         ),
       )
       .toBe("stopped");
+    // Saving another model stops the active capture; subsequent starts use it.
+    await page.getByRole("button", { name: "开始会议识别", exact: true }).click();
+    await expect.poll(() => page.evaluate(async () => (await window.api.getState()).runtime.voice.status)).toBe("listening");
+    await page.evaluate(() => window.api.command({ type: "voice:save", workspaceId: "workspace-test", model: "paraformer-realtime-v2" }));
+    assert.equal((await page.evaluate(() => window.api.getState())).runtime.voice.status, "stopped");
     // Pause also stops a second recording and does not resume capture automatically.
     await page
       .getByRole("button", { name: "开始会议识别", exact: true })
@@ -332,6 +366,9 @@ async function mainPage(app) {
     app = null;
     app = await electron.launch({ args: ["."], env });
     const restarted = await mainPage(app);
+    assert.equal((await restarted.evaluate(() => window.api.getState())).voiceConfig.model, "paraformer-realtime-v2");
+    await restarted.getByRole("button", { name: "应用设置", exact: true }).click();
+    await expect(restarted.getByLabel("语音识别模型", { exact: true })).toHaveValue("paraformer-realtime-v2");
     rows = await restarted.evaluate(
       (id) => window.api.transcripts(id),
       sessionId,

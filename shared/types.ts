@@ -1,4 +1,6 @@
 import type { MobileRuntime, MobileCommand } from "./mobile";
+import type { MockCommand, MockInterviewSession, MockRuntime } from "./mock";
+export * from "./mock";
 export * from "./mobile";
 import type {
   VoiceConfig,
@@ -145,6 +147,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   },
 };
 export interface DesktopState {
+  mockInterviews: MockInterviewSession[];
   voiceConfig: VoiceConfig;
   models: ModelConfig[];
   activeModelId: string;
@@ -153,6 +156,7 @@ export interface DesktopState {
   activeSessionId: string | null;
   preferences: Preferences;
   runtime: {
+    mock: MockRuntime;
     mobile: MobileRuntime;
     voice: VoiceRuntime;
     port: number;
@@ -174,6 +178,7 @@ export interface DesktopState {
   };
 }
 export type Command =
+  | MockCommand
   | MobileCommand
   | VoiceCommand
   | { type: "clipboard:write"; text: string }

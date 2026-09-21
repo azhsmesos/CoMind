@@ -27,6 +27,7 @@ export class Service {
     private generate = generateAnswer,
   ) {
     this.runtime = {
+      mock: { mic: "off", partial: "", level: 0 },
       mobile: { enabled: false, addresses: [], clients: 0 },
       voice: {
         status: "stopped",

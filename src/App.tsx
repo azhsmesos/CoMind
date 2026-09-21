@@ -1,4 +1,5 @@
 import { VoiceStatus } from "./components/Voice";
+import { MockInterview } from "./components/MockInterview";
 import { useEffect, useRef, useState } from "react";
 import {
   LayoutDashboard,
@@ -39,6 +40,12 @@ const navigation = [
     label: "我的资料库",
     icon: BookOpen,
     subtitle: "集中整理资料，随时获取所需",
+  },
+  {
+    id: "mock",
+    label: "模拟面试",
+    icon: Sparkles,
+    subtitle: "基于简历和岗位，练习回答，获得有依据的复盘",
   },
   {
     id: "history",
@@ -275,7 +282,8 @@ export default function App() {
       const result = await window.api.command(command);
       if (
         !result.ok ||
-        (result.text && command.type !== "materials:import-resume")
+        (result.text && command.type !== "materials:import-resume" &&
+          command.type !== "mock:create" && command.type !== "mock:role")
       )
         setFeedback({
           text: result.error || result.text || "",
@@ -434,6 +442,7 @@ export default function App() {
           {tab === "materials" && (
             <Materials initial={state.materials} run={run} />
           )}
+          {tab === "mock" && <MockInterview state={state} run={run} />}
           {tab === "history" && <History state={state} run={run} />}
           {tab === "settings" && <Settings state={state} run={run} />}
           {tab === "shortcuts" && <Shortcuts state={state} run={run} />}

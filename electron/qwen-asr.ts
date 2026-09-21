@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
-import { voiceEndpoint } from "../shared/voice";
+import { voiceEndpoint, voiceModel, VOICE_MODEL } from "../shared/voice";
 export class AsrError extends Error {
   constructor(
     message: string,
@@ -33,18 +33,25 @@ export class QwenAsr {
   private socket?: WebSocket;
   private stopPending?: () => void;
   private ready = false;
+  private taskId?: string;
   constructor(
     private callbacks: AsrCallbacks,
     private endpoint = voiceEndpoint,
   ) {}
-  connect(workspaceId: string, apiKey: string) {
+  connect(workspaceId: string, apiKey: string, model: string = VOICE_MODEL) {
     if (!apiKey)
       return Promise.reject(new AsrError("请先配置百炼语音 API Key", true));
     return new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(this.endpoint(workspaceId), {
+      const selected = voiceModel(model);
+      this.close();
+      const taskId = selected.protocol === "inference" ? randomUUID() : undefined;
+      this.taskId = taskId;
+      let speakingItem: string | undefined;
+      const finished = new Set<string>();
+      const ws = new WebSocket(this.endpoint(workspaceId, selected.id), {
         headers: {
           Authorization: `Bearer ${apiKey}`,
-          "OpenAI-Beta": "realtime=v1",
+          ...(!taskId ? { "OpenAI-Beta": "realtime=v1" } : {}),
         },
         handshakeTimeout: 15000,
         maxPayload: 1024 * 1024,
@@ -76,6 +83,23 @@ export class QwenAsr {
         }
       };
       ws.on("open", () => {
+        if (this.socket !== ws) return;
+        if (taskId) {
+          ws.send(JSON.stringify({
+            header: { action: "run-task", task_id: taskId, streaming: "duplex" },
+            payload: {
+              task_group: "audio", task: "asr", function: "recognition",
+              model: selected.id,
+              parameters: {
+                format: "pcm", sample_rate: 16000,
+                semantic_punctuation_enabled: false,
+                max_sentence_silence: 800, heartbeat: true,
+              },
+              input: {},
+            },
+          }));
+          return;
+        }
         ws.send(
           JSON.stringify({
             event_id: randomUUID(),
@@ -102,7 +126,51 @@ export class QwenAsr {
           fail(new AsrError("语音服务返回格式错误"));
           return;
         }
-        if (!event || typeof event.type !== "string") return;
+        if (!event || typeof event !== "object") return;
+        if (taskId) {
+          const header = event.header as Record<string, unknown> | undefined;
+          if (!header || header.task_id !== taskId) return;
+          if (header.event === "task-started" && !settled) {
+            clearTimeout(timeout);
+            settled = true;
+            this.ready = true;
+            resolve();
+          } else if (header.event === "task-failed") {
+            // Never expose the service's error_message: it may echo credentials.
+            fail(asrError(String(header.error_code || "unknown")));
+          } else if (header.event === "task-finished") {
+            fail(new AsrError("语音会话已结束，正在重新连接"));
+          } else if (header.event === "result-generated" && this.ready) {
+            const payload = event.payload as { output?: { sentence?: Record<string, unknown> } } | undefined;
+            const sentence = payload?.output?.sentence;
+            if (!sentence || sentence.heartbeat === true) return;
+            // Fun-ASR can refine begin_time between partial and final results;
+            // use its sentence_id. Paraformer identifies a sentence by begin_time.
+            const id = Number.isInteger(sentence.sentence_id)
+              ? `sentence:${sentence.sentence_id}`
+              : Number.isInteger(sentence.begin_time) ? `time:${sentence.begin_time}` : undefined;
+            if (!id || typeof sentence.text !== "string" || typeof sentence.sentence_end !== "boolean") {
+              fail(new AsrError("语音服务返回的转写格式无效"));
+              return;
+            }
+            const item_id = `${taskId}:${id}`;
+            if (finished.has(item_id)) return;
+            if (sentence.sentence_end) {
+              finished.add(item_id);
+              if (finished.size > 10000) finished.delete(finished.values().next().value!);
+              if (speakingItem === item_id) speakingItem = undefined;
+              this.callbacks.event({ type: "conversation.item.input_audio_transcription.completed", item_id, transcript: sentence.text });
+            } else {
+              if (speakingItem !== item_id) {
+                speakingItem = item_id;
+                this.callbacks.event({ type: "input_audio_buffer.speech_started", item_id });
+              }
+              this.callbacks.event({ type: "conversation.item.input_audio_transcription.text", item_id, text: sentence.text });
+            }
+          }
+          return;
+        }
+        if (typeof event.type !== "string") return;
         if (
           event.type === "error" ||
           event.type === "conversation.item.input_audio_transcription.failed"
@@ -137,6 +205,10 @@ export class QwenAsr {
       return;
     if (this.socket.bufferedAmount > 64_000)
       throw new AsrError("网络过慢，音频发送中断");
+    if (this.taskId) {
+      this.socket.send(Buffer.from(data));
+      return;
+    }
     this.socket.send(
       JSON.stringify({
         event_id: randomUUID(),
@@ -147,6 +219,8 @@ export class QwenAsr {
   }
   close() {
     const ws = this.socket;
+    const taskId = this.taskId;
+    this.taskId = undefined;
     this.socket = undefined;
     this.ready = false;
     this.stopPending?.();
@@ -155,7 +229,9 @@ export class QwenAsr {
     // Ignore late final transcripts after an explicit stop; bound socket cleanup.
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(
-        JSON.stringify({ event_id: randomUUID(), type: "session.finish" }),
+        JSON.stringify(taskId
+          ? { header: { action: "finish-task", task_id: taskId, streaming: "duplex" }, payload: { input: {} } }
+          : { event_id: randomUUID(), type: "session.finish" }),
       );
       ws.close();
       const timer = setTimeout(() => ws.terminate(), 1000);

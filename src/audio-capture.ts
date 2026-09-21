@@ -27,7 +27,11 @@ window.startVoiceCapture = async () => {
     }
   };
   try {
-    stream = await navigator.mediaDevices.getDisplayMedia({
+    stream = location.hash === "#mock-microphone"
+      ? await navigator.mediaDevices.getUserMedia({
+          video: false, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        })
+      : await navigator.mediaDevices.getDisplayMedia({
       audio: true,
       video: { width: 1, height: 1, frameRate: 1 },
     });

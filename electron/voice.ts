@@ -64,7 +64,7 @@ export class Voice {
     const asr = this.makeAsr({ event: () => {}, disconnected: () => {} });
     this.testing = asr;
     try {
-      await asr.connect(config.workspaceId, this.service.store.voiceKey());
+      await asr.connect(config.workspaceId, this.service.store.voiceKey(), config.model);
       return "百炼语音连接成功";
     } finally {
       asr.close();
@@ -160,6 +160,7 @@ export class Voice {
     await asr.connect(
       this.service.store.voiceConfig().workspaceId,
       this.service.store.voiceKey(),
+      this.service.store.voiceConfig().model,
     );
     if (!current()) asr.close();
   }
@@ -453,6 +454,8 @@ export class Voice {
     this.showAnswer();
   }
   stop(error?: string) {
+    this.testing?.close();
+    this.testing = undefined;
     const sessionId = this.sessionId;
     const roundId = this.activeRound;
     this.epoch++;

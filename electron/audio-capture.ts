@@ -17,6 +17,7 @@ export interface AudioSource {
   stop(): void;
 }
 export class AudioCapture implements AudioSource {
+  private generation = 0;
   private win?: BrowserWindow;
   private cancel?: () => void;
   private frame?: (data: Uint8Array, level: number) => void;
@@ -30,8 +31,8 @@ export class AudioCapture implements AudioSource {
       event.senderFrame === this.win.webContents.mainFrame
     );
   }
-  constructor() {
-    ipcMain.on("voice:pcm", (event, data, level) => {
+  constructor(private source: "system" | "microphone" = "system") {
+    ipcMain.on(this.channel("pcm"), (event, data, level) => {
       if (
         !this.authorized(event) ||
         !(data instanceof Uint8Array) ||
@@ -41,10 +42,10 @@ export class AudioCapture implements AudioSource {
         return;
       this.frame?.(data, Math.max(0, Math.min(1, level)));
     });
-    ipcMain.on("voice:audio-ready", (event) => {
+    ipcMain.on(this.channel("audio-ready"), (event) => {
       if (this.authorized(event)) this.ready?.();
     });
-    ipcMain.on("voice:audio-error", (event, code) => {
+    ipcMain.on(this.channel("audio-error"), (event, code) => {
       if (!this.authorized(event)) return;
       const message =
         code === "NotAllowedError"
@@ -52,17 +53,22 @@ export class AudioCapture implements AudioSource {
           : code === "ended"
             ? "系统音频采集中断，请重新开始会议识别"
             : "无法读取系统音频，请检查录屏与系统录音权限及当前音频设备";
-      this.failure?.(message);
+      this.failure?.(this.source === "microphone"
+        ? code === "NotAllowedError" ? "麦克风权限未获允许，请在系统设置中授权后重试" : "麦克风采集中断，请重新开始回答；已有文字已保留"
+        : message);
     });
+  }
+  private channel(name: string) {
+    return (this.source === "microphone" ? "mock-mic:" : "voice:") + name;
   }
   async start(
     frame: (data: Uint8Array, level: number) => void,
     error: (message: string) => void,
   ) {
-    if (process.platform !== "darwin")
+    if (this.source === "system" && process.platform !== "darwin")
       throw new Error("会议识别首版仅支持 macOS");
     if (
-      ["denied", "restricted"].includes(
+      this.source === "system" && ["denied", "restricted"].includes(
         systemPreferences.getMediaAccessStatus("screen"),
       )
     )
@@ -70,8 +76,13 @@ export class AudioCapture implements AudioSource {
         "请先在录屏与系统录音中授权 CoMind 及启动终端，并重启应用",
       );
     this.stop();
+    const generation = this.generation;
+    if (this.source === "microphone" && process.platform === "darwin" &&
+        !(await systemPreferences.askForMediaAccess("microphone")))
+      throw new Error("麦克风权限未获允许，请在系统设置 → 隐私与安全性 → 麦克风中授权");
+    if (generation !== this.generation) throw new Error("音频采集已取消");
     this.frame = frame;
-    const ses = session.fromPartition("comind-system-audio");
+    const ses = session.fromPartition(this.source === "microphone" ? "comind-mock-microphone" : "comind-system-audio");
     const win = new BrowserWindow({
       show: false,
       width: 1,
@@ -80,7 +91,7 @@ export class AudioCapture implements AudioSource {
       skipTaskbar: true,
       webPreferences: {
         session: ses,
-        preload: path.join(__dirname, "audio-preload.js"),
+        preload: path.join(__dirname, this.source === "microphone" ? "mock-audio-preload.js" : "audio-preload.js"),
         contextIsolation: true,
         sandbox: true,
         nodeIntegration: false,
@@ -90,23 +101,28 @@ export class AudioCapture implements AudioSource {
     });
     this.win = win;
     const permitted = () => this.win === win && !win.isDestroyed();
-    // This partition has no user browsing. Never grant microphone/camera access.
+    // Isolated capture partitions: microphone access never leaks to desktop/overlay.
     ses.setPermissionCheckHandler(
-      (wc, permission) =>
+      (wc, permission, _origin, details) =>
         permitted() &&
         wc === win.webContents &&
-        String(permission) === "display-capture",
+        (this.source === "system" ? String(permission) === "display-capture"
+          : permission === "media" && details.mediaType === "audio"),
     );
-    ses.setPermissionRequestHandler((wc, permission, callback) =>
+    ses.setPermissionRequestHandler((wc, permission, callback, details) =>
       callback(
         permitted() &&
           wc === win.webContents &&
-          permission === "display-capture",
+          // Electron 43 requests loopback media with an empty mediaTypes list.
+          // This isolated window never permits camera or microphone requests.
+          (this.source === "system" ? permission === "display-capture" ||
+            (permission === "media" && "mediaTypes" in details && details.mediaTypes?.length === 0)
+            : permission === "media" && "mediaTypes" in details && details.mediaTypes?.length === 1 && details.mediaTypes[0] === "audio"),
       ),
     );
     ses.setDisplayMediaRequestHandler(
       async (request, callback) => {
-        if (!permitted() || request.frame !== win.webContents.mainFrame) {
+        if (this.source !== "system" || !permitted() || request.frame !== win.webContents.mainFrame) {
           callback({});
           return;
         }
@@ -137,7 +153,7 @@ export class AudioCapture implements AudioSource {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       const timer = setTimeout(
-        () => this.failure?.("系统音频启动超时，请检查录屏与系统录音授权"),
+        () => this.failure?.(this.source === "microphone" ? "麦克风启动超时，请检查麦克风授权" : "系统音频启动超时，请检查录屏与系统录音授权"),
         20000,
       );
       this.ready = () => {
@@ -166,9 +182,9 @@ export class AudioCapture implements AudioSource {
       );
       const loading =
         !app.isPackaged && process.env.NODE_ENV === "development"
-          ? win.loadURL("http://localhost:5180/#audio-capture")
+          ? win.loadURL("http://localhost:5180/#" + (this.source === "microphone" ? "mock-microphone" : "audio-capture"))
           : win.loadFile(path.join(__dirname, "../../dist/index.html"), {
-              hash: "audio-capture",
+              hash: this.source === "microphone" ? "mock-microphone" : "audio-capture",
             });
       void loading
         .then(() => {
@@ -184,6 +200,7 @@ export class AudioCapture implements AudioSource {
     });
   }
   stop() {
+    this.generation++;
     const win = this.win;
     this.win = undefined;
     this.frame = undefined;
@@ -195,7 +212,7 @@ export class AudioCapture implements AudioSource {
   }
   dispose() {
     this.stop();
-    for (const c of ["voice:pcm", "voice:audio-ready", "voice:audio-error"])
-      ipcMain.removeAllListeners(c);
+    for (const c of ["pcm", "audio-ready", "audio-error"])
+      ipcMain.removeAllListeners(this.channel(c));
   }
 }

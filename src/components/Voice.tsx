@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Mic, Square, Play, Check, Radio } from "lucide-react";
 import {
   VOICE_LABELS,
-  VOICE_MODEL,
+  VOICE_MODELS,
+  type VoiceModel,
   voiceEndpoint,
   type DesktopState,
   type Session,
@@ -19,21 +20,33 @@ export function VoiceSettings({
   run: Run;
 }) {
   const [workspace, setWorkspace] = useState(state.voiceConfig.workspaceId);
+  const [model, setModel] = useState<VoiceModel>(state.voiceConfig.model);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const resultRef = useRef<HTMLDivElement>(null);
   const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    setTestResult(null);
+  }, [state.voiceConfig.model, state.voiceConfig.workspaceId, state.voiceConfig.hasKey]);
+  useEffect(() => {
+    if (testResult) resultRef.current?.scrollIntoView({ block: "nearest" });
+  }, [testResult]);
   let endpoint = "填写 Workspace ID 后自动生成北京地域地址";
   try {
-    endpoint = voiceEndpoint(workspace.trim());
+    endpoint = voiceEndpoint(workspace.trim(), model);
   } catch {
     /* Show the help text while incomplete. */
   }
   async function save() {
+    setTestResult(null);
     setBusy(true);
     try {
       const result = await run({
         type: "voice:save",
         workspaceId: workspace,
+        model,
         apiKey: key,
       });
       if (result.ok) {
@@ -51,7 +64,7 @@ export function VoiceSettings({
           <h2>
             <Mic size={20} /> 会议语音识别
           </h2>
-          <p>阿里云百炼 · 北京 · {VOICE_MODEL}</p>
+          <p>阿里云百炼 · 北京 · {state.voiceConfig.model}</p>
         </div>
         <span className="tag">独立语音连接</span>
       </div>
@@ -61,12 +74,31 @@ export function VoiceSettings({
       </p>
       <div className="form-grid">
         <label>
+          语音识别模型
+          <select
+            aria-label="语音识别模型"
+            value={model}
+            disabled={busy}
+            onChange={(e) => {
+              setModel(e.target.value as VoiceModel);
+              setSaved(false);
+              setTestResult(null);
+            }}
+          >
+            {VOICE_MODELS.map((item) => (
+              <option key={item.id} value={item.id}>{item.label}</option>
+            ))}
+          </select>
+        </label>
+        <label>
           百炼 Workspace ID
           <input
             value={workspace}
+            disabled={busy}
             onChange={(e) => {
               setWorkspace(e.target.value);
               setSaved(false);
+              setTestResult(null);
             }}
             placeholder="北京地域的 Workspace ID"
           />
@@ -75,11 +107,13 @@ export function VoiceSettings({
           语音 API Key
           <input
             type="password"
+            disabled={busy}
             autoComplete="off"
             value={key}
             onChange={(e) => {
               setKey(e.target.value);
               setSaved(false);
+              setTestResult(null);
             }}
             placeholder={
               state.voiceConfig.hasKey
@@ -90,6 +124,10 @@ export function VoiceSettings({
         </label>
       </div>
       <p className="muted voice-endpoint">{endpoint}</p>
+      <p className="muted">
+        会议转写与模拟面试共用此模型。修改后请保存并测试连接；保存会停止当前识别，
+        再次开始后使用新模型。API Key 留空可保留原密钥，需确保账号已开通所选模型。
+      </p>
       <p className="muted">
         {state.runtime.encryptedStorage
           ? "密钥使用系统加密保存，不会传回页面。"
@@ -106,20 +144,42 @@ export function VoiceSettings({
             busy ||
             !state.voiceConfig.hasKey ||
             !!key ||
+            model !== state.voiceConfig.model ||
             workspace !== state.voiceConfig.workspaceId
           }
           onClick={async () => {
             setBusy(true);
+            setTesting(true);
+            setTestResult(null);
             try {
-              await run({ type: "voice:test" });
+              const result = await run({ type: "voice:test" });
+              setTestResult({
+                ok: result.ok,
+                text: result.ok
+                  ? `连接测试成功：${state.voiceConfig.model}。现在可以开始语音识别。`
+                  : `连接测试失败：${result.error || result.text || "请检查语音配置后重试"}`,
+              });
+            } catch {
+              setTestResult({ ok: false, text: "连接测试失败：无法连接桌面服务，请重试。" });
             } finally {
               setBusy(false);
+              setTesting(false);
             }
           }}
         >
-          {busy ? "处理中…" : "测试语音连接"}
+          {testing ? "正在测试连接…" : "测试语音连接"}
         </button>
       </div>
+      {testResult && (
+        <div
+          ref={resultRef}
+          className={testResult.ok ? "info-box" : "error-box"}
+          role={testResult.ok ? "status" : "alert"}
+          aria-label="语音连接测试结果"
+        >
+          {testResult.text}
+        </div>
+      )}
     </section>
   );
 }

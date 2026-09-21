@@ -21,6 +21,9 @@ import { Screenshot } from "./Screenshot";
 import { AudioCapture } from "./audio-capture";
 import { MobileServer } from "./mobile-server";
 import { Voice } from "./voice";
+import { MockInterview, mockMarkdown } from "./mock-interview";
+import { MockVoice } from "./mock-voice";
+import { mockElapsed } from "../shared/mock";
 import type { Command, CommandResult } from "../shared/types";
 
 // Use ScreenCaptureKit system-audio permission instead of a terminal-dependent CoreAudio Tap plist.
@@ -55,6 +58,10 @@ let overlay: OverlayWindow;
 let screenshot: Screenshot;
 let audio: AudioCapture;
 let voice: Voice;
+let mock: MockInterview;
+let mockVoice: MockVoice;
+let microphone: AudioCapture;
+let mockCheckpoint: ReturnType<typeof setInterval> | undefined;
 let tray: Tray | null = null;
 let service: Service;
 let dom: DomServer;
@@ -71,7 +78,9 @@ function broadcast() {
   const state = service.state();
   for (const win of [mainWindow, overlay?.window])
     if (win && !win.isDestroyed())
-      win.webContents.send("desktop:changed", state);
+      win.webContents.send("desktop:changed", win === mainWindow ? state : {
+        ...state, mockInterviews: [], runtime: { ...state.runtime, mock: { mic: "off", partial: "", level: 0 } },
+      });
 }
 function showMain() {
   mainWindow?.show();
@@ -240,6 +249,59 @@ async function command(c: Command): Promise<CommandResult> {
     )
       voice.stop();
     switch (c.type) {
+      case "mock:role":
+        return { ok: true, text: await mock.role(c.jd) };
+      case "mock:create":
+        return { ok: true, text: mock.create(c.setup) };
+      case "mock:start":
+      case "mock:resume":
+        await mock.start(c.id);
+        return { ok: true };
+      case "mock:next":
+        await mock.next(c.id);
+        if (mock.session(c.id).status === "completed") await mock.report(c.id);
+        return { ok: true };
+      case "mock:draft":
+        mockVoice.continue();
+        mock.draft(c.id, c.turnId, c.text);
+        return { ok: true };
+      case "mock:submit":
+        await mockVoice.submit(c.id, c.turnId, c.text);
+        return { ok: true };
+      case "mock:skip":
+        mockVoice.stop();
+        await mock.skip(c.id);
+        if (mock.session(c.id).status === "completed") await mock.report(c.id);
+        return { ok: true };
+      case "mock:pause":
+        mockVoice.stop(); mock.pause(c.id);
+        return { ok: true };
+      case "mock:end":
+        mockVoice.stop(); mock.end(c.id);
+        await mock.report(c.id);
+        return { ok: true };
+      case "mock:report":
+        await mock.report(c.id, c.turnId);
+        return { ok: true };
+      case "mock:listen":
+        await mockVoice.listen(c.id);
+        return { ok: true };
+      case "mock:continue":
+        mockVoice.continue();
+        return { ok: true };
+      case "mock:mic-stop":
+        mockVoice.stop();
+        return { ok: true };
+      case "mock:export": {
+        const s = mock.session(c.id);
+        if (s.status !== "completed") throw new Error("请先结束模拟面试");
+        const result = await dialog.showSaveDialog(mainWindow!, {
+          title: "导出模拟面试报告", defaultPath: "CoMind-模拟面试-" + s.createdAt.slice(0, 10) + ".md",
+          filters: [{ name: "Markdown", extensions: ["md"] }],
+        });
+        if (!result.canceled && result.filePath) fs.writeFileSync(result.filePath, mockMarkdown(s), "utf8");
+        return { ok: true, text: result.canceled ? "已取消导出" : "导出成功" };
+      }
       case "mobile:start":
         if (c.address !== undefined && typeof c.address !== "string") throw new Error("无效网络地址");
         await mobile.start(c.address);
@@ -254,13 +316,15 @@ async function command(c: Command): Promise<CommandResult> {
         mobile.refresh();
         return { ok: true };
       case "voice:save":
-        service.store.saveVoice(c.workspaceId, c.apiKey);
+        service.store.saveVoice(c.workspaceId, c.apiKey, c.model);
         voice.stop();
+        mockVoice.stop();
         service.changed();
         return { ok: true, text: "语音连接已保存" };
       case "voice:test":
         return { ok: true, text: await voice.test() };
       case "voice:start":
+        if (service.runtime.mock.mic !== "off") throw new Error("请先停止模拟面试的麦克风");
         await voice.start();
         return { ok: true };
       case "voice:stop":
@@ -396,6 +460,14 @@ if (!app.requestSingleInstanceLock()) {
       voice = new Voice(service, audio, undefined, undefined, () => {
         if (!overlay.visible) overlay.show();
       });
+      mock = new MockInterview(service);
+      microphone = new AudioCapture("microphone");
+      mockVoice = new MockVoice(mock, microphone);
+      mockCheckpoint = setInterval(() => {
+        for (const s of store.data.mockInterviews) if (s.status === "ongoing") {
+          s.elapsedMs = mockElapsed(s); s.runningSince = Date.now(); service.changed();
+        }
+      }, 15000);
       screenshot = new Screenshot((text, error) =>
         screenshotLog(text, error, true),
       );
@@ -456,10 +528,15 @@ if (!app.requestSingleInstanceLock()) {
       });
       ipcMain.handle("desktop:state", (event) => {
         if (!allowed(event)) throw new Error("不允许的请求");
-        return service.state();
+        const state = service.state();
+        return event.sender === mainWindow?.webContents ? state : {
+          ...state, mockInterviews: [], runtime: { ...state.runtime, mock: { mic: "off", partial: "", level: 0 } },
+        };
       });
       ipcMain.handle("desktop:command", (event, c) => {
         if (!allowed(event)) return { ok: false, error: "不允许的请求" };
+        if (String(c?.type).startsWith("mock:") && event.sender !== mainWindow?.webContents)
+          return { ok: false, error: "模拟面试仅可在主窗口操作" };
         return command(c);
       });
       secureWindow(mainWindow);
@@ -471,6 +548,13 @@ if (!app.requestSingleInstanceLock()) {
       mainWindow.on("hide", restoreShortcuts);
       mainWindow.webContents.on("did-start-loading", restoreShortcuts);
       mainWindow.webContents.on("render-process-gone", restoreShortcuts);
+      const pauseMock = () => {
+        mockVoice.stop();
+        for (const s of store.data.mockInterviews) if (s.status === "ongoing") mock.pause(s.id);
+      };
+      mainWindow.on("hide", pauseMock);
+      mainWindow.webContents.on("render-process-gone", pauseMock);
+      mainWindow.webContents.on("did-start-loading", pauseMock);
       mainWindow.once("ready-to-show", showMain);
       mainWindow.on("close", (event) => {
         if (!quitting && tray) {
@@ -583,6 +667,10 @@ if (!app.requestSingleInstanceLock()) {
     console.info("[app] 正在退出 CoMind，释放快捷键和扩展服务");
     quitting = true;
     mobile?.stop();
+    clearInterval(mockCheckpoint);
+    mockVoice?.stop();
+    microphone?.dispose();
+    mock?.dispose();
     voice?.dispose();
     audio?.dispose();
     service?.dispose();

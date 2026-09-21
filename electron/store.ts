@@ -1,5 +1,6 @@
 import { Transcripts } from "./transcripts";
-import { voiceEndpoint, type VoiceConfig } from "../shared/voice";
+import type { MockInterviewSession } from "../shared/mock";
+import { voiceEndpoint, voiceModel, VOICE_MODEL, type VoiceConfig, type VoiceModel } from "../shared/voice";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -22,8 +23,9 @@ interface SavedModel extends Omit<ModelConfig, "hasKey"> {
   credentialId: string;
 }
 interface SavedData {
+  mockInterviews: MockInterviewSession[];
   version: 1;
-  voice?: { workspaceId: string; credentialId: string; autoAnswer: boolean };
+  voice?: { workspaceId: string; credentialId: string; autoAnswer: boolean; model?: VoiceModel };
   models: SavedModel[];
   credentials: Record<string, string>;
   activeModelId: string;
@@ -45,6 +47,7 @@ export class Store {
   ) {
     this.transcripts = new Transcripts(file + ".transcripts");
     this.data = {
+      mockInterviews: [],
       version: 1,
       models: [],
       credentials: {},
@@ -102,6 +105,15 @@ export class Store {
           },
         };
         // Newly introduced defaults must not take an existing custom shortcut.
+        if (!Array.isArray(this.data.mockInterviews)) this.data.mockInterviews = [];
+        this.data.mockInterviews = this.data.mockInterviews.filter(s =>
+          s && typeof s.id === "string" && s.setup && s.model && Array.isArray(s.turns) &&
+          ["draft", "ongoing", "paused", "completed"].includes(s.status));
+        for (const s of this.data.mockInterviews) {
+          if (s.status === "ongoing") s.status = "paused";
+          s.runningSince = undefined;
+          if (!Number.isFinite(s.elapsedMs)) s.elapsedMs = 0;
+        }
         const assigned = new Set(
           Object.values(saved.preferences.shortcuts || {})
             .filter((key): key is string => typeof key === "string")
@@ -166,18 +178,20 @@ export class Store {
   voiceConfig(): VoiceConfig {
     return {
       workspaceId: this.data.voice?.workspaceId || "",
+      model: this.data.voice?.model ?? VOICE_MODEL,
       autoAnswer: this.data.voice?.autoAnswer ?? true,
       hasKey: !!this.voiceKey(),
     };
   }
-  saveVoice(workspaceId: string, apiKey?: string) {
+  saveVoice(workspaceId: string, apiKey?: string, model: string = this.voiceConfig().model) {
     if (
       typeof workspaceId !== "string" ||
       (apiKey !== undefined && typeof apiKey !== "string")
     )
       throw new Error("语音配置格式无效");
     workspaceId = workspaceId.trim();
-    voiceEndpoint(workspaceId);
+    const selected = voiceModel(model);
+    voiceEndpoint(workspaceId, selected.id);
     const key = apiKey?.trim();
     if (
       key &&
@@ -186,6 +200,7 @@ export class Store {
       throw new Error("请填写完整语音 API Key，不含空白、引号或掩码");
     const config = {
       workspaceId,
+      model: selected.id,
       credentialId: this.data.voice?.credentialId || randomUUID(),
       autoAnswer: this.data.voice?.autoAnswer ?? true,
     };
@@ -270,6 +285,7 @@ export class Store {
       models: this.models(),
       activeModelId: d.activeModelId,
       materials: d.materials,
+      mockInterviews: d.mockInterviews,
       sessions: d.sessions,
       activeSessionId: d.activeSessionId,
       preferences: d.preferences,

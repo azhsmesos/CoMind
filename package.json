@@ -22,7 +22,8 @@
     "pack": "npm run build && electron-builder --dir --publish never",
     "test:voice": "npm run build && node scripts/voice-e2e.cjs",
     "build:mobile": "vite build --config vite.mobile.config.mts",
-    "test:mobile": "npm run build && node --test tests/mobile.test.cjs && node scripts/mobile-e2e.cjs"
+    "test:mobile": "npm run build && node --test tests/mobile.test.cjs && node scripts/mobile-e2e.cjs",
+    "test:mock": "npm run build && node --test tests/mock.test.cjs && node scripts/mock-e2e.cjs"
   },
   "dependencies": {
     "lucide-react": "^1.47.0",
@@ -112,6 +113,7 @@
       "identity": null,
       "category": "public.app-category.productivity",
       "extendInfo": {
+        "NSMicrophoneUsageDescription": "CoMind 在模拟面试中将你的麦克风回答转写为文字，用于追问和复盘。",
         "NSAudioCaptureUsageDescription": "CoMind 将会议系统声音转写为文字并识别问题。",
         "NSScreenCaptureUsageDescription": "CoMind 需要捕获屏幕及系统音频以支持截图和会议转写。"
       }
