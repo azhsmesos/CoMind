@@ -2,7 +2,11 @@
 
 **CoMind** 是基于 **Open Interview Assistant** 扩展的智能办公助手。提供侧栏导航、资料库、回答区和复盘界面，接入真实模型、Chrome 网页采集与 Electron 原生悬浮窗。
 
-快速了解项目：[项目简介](INTRODUCTION.md)。源码仓库：[azhsmesos/CoMind](https://github.com/azhsmesos/CoMind)。
+快速了解项目：[项目简介](INTRODUCTION.md)。详细图文文档：[CoMind 使用与原理指南](docs/CoMind-使用与原理指南.md)（功能、启动配置、操作步骤、架构与排查，附 10 张界面截图）。模拟面试：[专项指南](MOCK_INTERVIEW.md)。源码仓库：[azhsmesos/CoMind](https://github.com/azhsmesos/CoMind)。
+
+![CoMind 工作台，使用隔离演示资料](docs/images/01-workspace.png)
+
+> 截图来自真实界面，内容由虚构资料与本机模拟模型生成，不代表真实用户数据或云端模型表现。
 
 ## 安装与首次使用
 
@@ -119,7 +123,13 @@ macOS 首次使用需授予屏幕录制权限；开发模式可能需要允许 E
 
 穿透模式下，鼠标滚轮会交给下方窗口。使用上面的翻页快捷键即可滚动悬浮窗答案，长代码可左右滚动，不需要关闭穿透或切换焦点。Mac 的 Alt 对应 Option（⌥）。悬浮窗会显示实际已注册的按键；未启用或被占用时请在“快捷键”中重新设置。也可按 `Cmd/Ctrl Shift M` 暂时关闭穿透，直接使用滚轮。
 
-内容保护仅用于悬浮窗，并不能保证所有录屏/共享方式都不可见。部分 macOS ScreenCaptureKit 捕获不受保护。首版不包含录音、语音转写、手机同步。
+内容保护仅用于悬浮窗，并不能保证所有录屏/共享方式都不可见。部分 macOS ScreenCaptureKit 捕获不受保护。当前已支持会议转写、模拟面试语音问答和手机只读查看；不保存原始录音。
+
+### AI 模拟面试
+
+侧边栏「模拟面试」支持上传或导入简历、粘贴 JD、识别岗位，选择阿里校招／P6／P7／P8 训练档位和 15／30／45 分钟。文字或语音逐题作答，支持追问、暂停和跳过；结束后生成带原文证据的颜色评分、STAR 参考答案、缺失指标清单与整场总结。档位不代表阿里官方标准，资料不足不会编造成果数字。
+
+语音模式使用本地中文朗读和百炼麦克风转写，与会议系统声音识别互斥。报告在模拟面试记录中保存，可复制或导出 Markdown，部分失败可单独重试。详见 [完整操作与评分说明](docs/CoMind-使用与原理指南.md#6-模拟面试完整流程)。
 
 ## 数据与隐私
 
@@ -134,7 +144,7 @@ macOS 首次使用需授予屏幕录制权限；开发模式可能需要允许 E
 
 ## 本地开发
 
-建议 Node.js 22 或更高版本：
+建议使用已验证的 Node.js 24；先通过 `node -v` 确认当前终端版本：
 
 ```bash
 npm ci
@@ -150,6 +160,7 @@ npm run test:e2e
 npm run test:screenshot
 npm run test:voice
 npm run test:mobile
+npm run test:mock
 npm run dist:mac
 npm run dist:win
 npm run test:packaged
@@ -157,6 +168,7 @@ npm run test:packaged
 
 - 单元/协议测试使用本机 HTTP 测试服务器与合成凭据，不使用个人 API Key。
 - 端到端测试使用真实 Electron 窗口及隔离的临时数据目录；截图输出到 `test-results/`。
+- 文档截图可在构建后运行 `node scripts/docs-screenshots.cjs` 重新生成到 `docs/images/`；只使用虚构资料和本机模拟服务，不读取个人工作空间。
 - 截图专项测试使用合成屏幕图片和本机模拟模型，验证按钮和快捷键自动提交整屏、窗口状态不变、错误提示和重启保存；不读取真实屏幕或调用付费模型。真实屏幕权限和具体视觉模型仍需实机验证。
 - 语音专项测试使用真实隐藏 Electron 渲染器、AudioWorklet、合成音轨、本机 WebSocket/模型接口，验证自动答题、停止、权限隔离、窗口状态和记录保存；不会录制真实会议或调用付费接口。
 - 手机专项测试使用回环地址、隔离的 Electron 和 390px 宽的普通网页，验证鉴权、二维码入口、实时答案、分页、复制降级、断线恢复及悬浮窗状态；真实手机扫码、实际局域网防火墙和 Safari 行为仍需实机验收。
